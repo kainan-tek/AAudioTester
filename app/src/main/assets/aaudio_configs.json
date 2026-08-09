@@ -1,6 +1,7 @@
 {
-  // ===== 播放配置（12 场景）=====
+  // ===== 播放配置（16 场景）=====
   // audioFilePath 为空或 asset:// 开头 → 内置音源；普通路径如 /data/xx.wav 需系统权限。
+  // 后 4 条为 AAOS 系统 usage（AAUDIO_SYSTEM_USAGE_*），需 MODIFY_AUDIO_ROUTING 特权（priv-app 部署）。
   "player": [
     { "usage": "AAUDIO_USAGE_MEDIA", "contentType": "AAUDIO_CONTENT_TYPE_MUSIC",
       "performanceMode": "AAUDIO_PERFORMANCE_MODE_POWER_SAVING", "sharingMode": "AAUDIO_SHARING_MODE_SHARED",
@@ -37,7 +38,19 @@
       "audioFilePath": "asset://sample/48k_2ch_16bit.wav", "description": "Game Audio (Power Saving Mode)" },
     { "usage": "AAUDIO_USAGE_ASSISTANT", "contentType": "AAUDIO_CONTENT_TYPE_SPEECH",
       "performanceMode": "AAUDIO_PERFORMANCE_MODE_POWER_SAVING", "sharingMode": "AAUDIO_SHARING_MODE_SHARED",
-      "audioFilePath": "asset://sample/48k_2ch_16bit.wav", "description": "Voice Assistant (Power Saving Mode)" }
+      "audioFilePath": "asset://sample/48k_2ch_16bit.wav", "description": "Voice Assistant (Power Saving Mode)" },
+    { "usage": "AAUDIO_SYSTEM_USAGE_EMERGENCY", "contentType": "AAUDIO_CONTENT_TYPE_SONIFICATION",
+      "performanceMode": "AAUDIO_PERFORMANCE_MODE_LOW_LATENCY", "sharingMode": "AAUDIO_SHARING_MODE_SHARED",
+      "audioFilePath": "asset://sample/48k_2ch_16bit.wav", "description": "Emergency Alert (Low Latency) [需系统权限]" },
+    { "usage": "AAUDIO_SYSTEM_USAGE_SAFETY", "contentType": "AAUDIO_CONTENT_TYPE_SONIFICATION",
+      "performanceMode": "AAUDIO_PERFORMANCE_MODE_LOW_LATENCY", "sharingMode": "AAUDIO_SHARING_MODE_SHARED",
+      "audioFilePath": "asset://sample/48k_2ch_16bit.wav", "description": "Safety Warning (Low Latency) [需系统权限]" },
+    { "usage": "AAUDIO_SYSTEM_USAGE_VEHICLE_STATUS", "contentType": "AAUDIO_CONTENT_TYPE_SONIFICATION",
+      "performanceMode": "AAUDIO_PERFORMANCE_MODE_POWER_SAVING", "sharingMode": "AAUDIO_SHARING_MODE_SHARED",
+      "audioFilePath": "asset://sample/48k_2ch_16bit.wav", "description": "Vehicle Status Alert (Power Saving Mode) [需系统权限]" },
+    { "usage": "AAUDIO_SYSTEM_USAGE_ANNOUNCEMENT", "contentType": "AAUDIO_CONTENT_TYPE_SPEECH",
+      "performanceMode": "AAUDIO_PERFORMANCE_MODE_POWER_SAVING", "sharingMode": "AAUDIO_SHARING_MODE_SHARED",
+      "audioFilePath": "asset://sample/48k_2ch_16bit.wav", "description": "Public Announcement (Power Saving Mode) [需系统权限]" }
   ],
 
   // ===== 录音配置（8 场景）=====

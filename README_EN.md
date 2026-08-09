@@ -8,7 +8,7 @@ An audio testing tool for Android Automotive OS (AAOS) cars, built on the AAudio
 Top tabs switch between **Playback** / **Recording**; the two features are mutually exclusive (switching tabs stops the current one).
 
 ### Playback
-- **12 audio scenarios** (media/voice call/call signaling/alarm/notification/ringtone/notification event/accessibility/navigation/system sound/game/voice assistant), configurable via usage/contentType/performanceMode/sharingMode
+- **16 audio scenarios** (media/voice call/call signaling/alarm/notification/ringtone/notification event/accessibility/navigation/system sound/game/voice assistant, plus 4 AAOS system usages: emergency/safety/vehicle status/announcement), configurable via usage/contentType/performanceMode/sharingMode
 - Built-in 10s sweep source (`asset://sample/48k_2ch_16bit.wav`), no WAV file needed by default; can also use a `/data/xx.wav` real file
 - Full audio support: **1-16 channels**, **8kHz-192kHz**, **16/24/32-bit PCM**
 - Audio focus management: auto-stops when focus is taken

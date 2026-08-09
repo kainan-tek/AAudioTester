@@ -8,7 +8,7 @@
 顶部 Tab 切换「播放」/「录音」，两特性互斥（切 Tab 即停）。
 
 ### 播放
-- **12 种音频场景**（媒体/语音通话/通话信令/闹钟/通知/铃声/通知事件/辅助/导航/系统音/游戏/语音助手），每种可配 usage/contentType/performanceMode/sharingMode
+- **16 种音频场景**（媒体/语音通话/通话信令/闹钟/通知/铃声/通知事件/辅助/导航/系统音/游戏/语音助手，及 4 种 AAOS 系统 usage：紧急/安全/车辆状态/公共广播），每种可配 usage/contentType/performanceMode/sharingMode
 - 内置 10s 扫频音源（`asset://sample/48k_2ch_16bit.wav`），默认无需推 WAV 文件；也可配置 `/data/xx.wav` 真实文件
 - 完整音频支持：1-16 声道、8kHz-192kHz、16/24/32 位 PCM
 - 音频焦点管理：焦点被抢占时自动停止
