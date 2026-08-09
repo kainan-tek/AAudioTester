@@ -544,7 +544,6 @@ JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_release
         g_player.player_instance = nullptr;
     }
 
-    g_player.jvm = nullptr;
     g_player.on_playback_started_method = nullptr;
     g_player.on_playback_stopped_method = nullptr;
     g_player.on_playback_error_method = nullptr;

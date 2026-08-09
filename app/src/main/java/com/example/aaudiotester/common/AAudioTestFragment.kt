@@ -65,13 +65,22 @@ abstract class AAudioTestFragment : Fragment() {
         engine = createEngine(requireActivity().applicationContext)
         engine.setListener(object : AAudioEngine.Listener {
             override fun onStarted() {
-                activity?.runOnUiThread { updateButtons(true); statusText.text = messages.active; updateInfo() }
+                activity?.runOnUiThread {
+                    if (!isAdded) return@runOnUiThread
+                    updateButtons(true); statusText.text = messages.active; updateInfo()
+                }
             }
             override fun onStopped() {
-                activity?.runOnUiThread { updateButtons(false); statusText.text = messages.stopped; updateInfo() }
+                activity?.runOnUiThread {
+                    if (!isAdded) return@runOnUiThread
+                    updateButtons(false); statusText.text = messages.stopped; updateInfo()
+                }
             }
             override fun onError(error: String) {
-                activity?.runOnUiThread { updateButtons(false); showError(error) }
+                activity?.runOnUiThread {
+                    if (!isAdded) return@runOnUiThread
+                    updateButtons(false); showError(error)
+                }
             }
         })
 

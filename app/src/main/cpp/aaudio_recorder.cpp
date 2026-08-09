@@ -509,7 +509,6 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_releaseNative(JNIEnv *env,
         g_recorder.recorder_instance = nullptr;
     }
 
-    g_recorder.jvm = nullptr;
     g_recorder.on_recording_started_method = nullptr;
     g_recorder.on_recording_stopped_method = nullptr;
     g_recorder.on_recording_error_method = nullptr;
