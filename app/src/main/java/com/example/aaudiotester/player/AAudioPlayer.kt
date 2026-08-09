@@ -128,6 +128,10 @@ class AAudioPlayer(context: Context) : AAudioEngine {
     }
 
     private fun requestAudioFocus(): Boolean {
+        // AAOS 系统 usage（>=1000）AudioAttributes 无法表示（@hide，setUsage 会抛 IllegalArgumentException），
+        // 且系统 usage 属车辆关键音频、不依赖普通焦点管理，故跳过焦点请求。
+        if (AAudioConstants.getUsage(currentConfig.usage) >= 1000) return true
+
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(AAudioConstants.getUsage(currentConfig.usage))
             .setContentType(AAudioConstants.getContentType(currentConfig.contentType))
