@@ -111,7 +111,7 @@ class AAudioRecorder(context: Context) : AAudioEngine {
 
     private fun getDefaultDirectory(): String {
         return appContext.getExternalFilesDir(null)?.absolutePath
-            ?: throw IllegalStateException("Failed to get external files directory")
+            ?: appContext.filesDir.absolutePath
     }
 
     // Native methods

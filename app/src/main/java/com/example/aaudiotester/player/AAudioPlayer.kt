@@ -53,7 +53,12 @@ class AAudioPlayer(context: Context) : AAudioEngine {
 
     private fun resolveCurrentPath(): String {
         val path = currentConfig.audioFilePath.ifBlank { AAudioConstants.DEFAULT_ASSET }
-        return AssetExtractor.resolveAssetPath(appContext, path)
+        return try {
+            AssetExtractor.resolveAssetPath(appContext, path)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to resolve asset path: $path", e)
+            path  // 回退原始路径，让 native 报 [FILE] 错误走正常错误路径
+        }
     }
 
     override fun setListener(listener: AAudioEngine.Listener?) {
