@@ -149,9 +149,7 @@ class AAudioPlayer(context: Context) : AAudioEngine {
     }
 
     private fun determineFocusType(): Int = when {
-        currentConfig.usage.contains("EMERGENCY") || currentConfig.usage.contains("SAFETY") ->
-            AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-        currentConfig.usage.contains("NAVIGATION") || currentConfig.usage.contains("ANNOUNCEMENT") ->
+        currentConfig.usage.contains("NAVIGATION") ->
             AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
         currentConfig.usage.contains("VOICE_COMMUNICATION") ->
             AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
