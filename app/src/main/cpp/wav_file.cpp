@@ -152,8 +152,8 @@ std::string WavFile::getFormatInfo() const {
 bool WavFile::isValidFormat() const {
     return (header_.audio_format == 1 && header_.num_channels > 0 && header_.num_channels <= 16 &&
             header_.sample_rate > 0 && header_.sample_rate <= 192000 &&
-            (header_.bits_per_sample == 8 || header_.bits_per_sample == 16 ||
-             header_.bits_per_sample == 24 || header_.bits_per_sample == 32) &&
+            (header_.bits_per_sample == 16 || header_.bits_per_sample == 24 ||
+             header_.bits_per_sample == 32) &&
             header_.subchunk2_size > 0);
 }
 
