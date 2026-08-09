@@ -11,6 +11,7 @@
 - **12 种音频场景**（媒体/语音通话/通话信令/闹钟/通知/铃声/通知事件/辅助/导航/系统音/游戏/语音助手），每种可配 usage/contentType/performanceMode/sharingMode
 - 内置 10s 扫频音源（`asset://sample/48k_2ch_16bit.wav`），默认无需推 WAV 文件；也可配置 `/data/xx.wav` 真实文件
 - 完整音频支持：1-16 声道、8kHz-192kHz、8/16/24/32 位 PCM
+- 注：8-bit WAV 可被读入但会按 16-bit 处理，建议使用 16/24/32-bit 音源
 - 音频焦点管理：焦点被抢占时自动停止
 
 ### 录音

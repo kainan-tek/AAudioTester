@@ -11,6 +11,7 @@ Top tabs switch between **Playback** / **Recording**; the two features are mutua
 - **12 audio scenarios** (media/voice call/call signaling/alarm/notification/ringtone/notification event/accessibility/navigation/system sound/game/voice assistant), configurable via usage/contentType/performanceMode/sharingMode
 - Built-in 10s sweep source (`asset://sample/48k_2ch_16bit.wav`), no WAV file needed by default; can also use a `/data/xx.wav` real file
 - Full audio support: **1-16 channels**, **8kHz-192kHz**, **8/16/24/32-bit PCM**
+- Note: 8-bit WAV files are readable but processed as 16-bit; use 16/24/32-bit sources
 - Audio focus management: auto-stops when focus is taken
 
 ### Recording
