@@ -56,7 +56,6 @@ object AAudioConstants {
 
     object Usage {
         val MAP = mapOf(
-            AudioAttributes.USAGE_UNKNOWN to "AAUDIO_USAGE_UNKNOWN",
             AudioAttributes.USAGE_MEDIA to "AAUDIO_USAGE_MEDIA",
             AudioAttributes.USAGE_VOICE_COMMUNICATION to "AAUDIO_USAGE_VOICE_COMMUNICATION",
             AudioAttributes.USAGE_VOICE_COMMUNICATION_SIGNALLING to "AAUDIO_USAGE_VOICE_COMMUNICATION_SIGNALLING",
