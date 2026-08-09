@@ -33,6 +33,8 @@ adb uninstall com.example.aaudiotester          # 1. 先卸载普通安装
 adb root && adb remount                        # 3. 获取系统分区写权限
 adb push AAudioTester.apk /system/priv-app/AAudioTester/AAudioTester.apk
 # 4.（建议）在 /system/etc/permissions/ 加 privapp-permissions-com.example.aaudiotester.xml 白名单
+#    需包含签名权限：MODIFY_AUDIO_ROUTING / CAPTURE_AUDIO_OUTPUT / CAPTURE_AUDIO_HOTWORD
+#    （授予后 AAOS 系统 usage 与系统音源 ECHO_REFERENCE/HOTWORD 才可用）
 adb reboot                                      # 5. 重启生效
 ```
 > 旧部署若曾用 `/data/aaudio_player_configs.json` / `/data/aaudio_recorder_configs.json`，需合并迁移到 `/data/aaudio_configs.json`。

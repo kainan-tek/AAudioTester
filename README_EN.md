@@ -33,6 +33,8 @@ adb uninstall com.example.aaudiotester          # 1. uninstall the normal instal
 adb root && adb remount                        # 3. remount system partition for write access
 adb push AAudioTester.apk /system/priv-app/AAudioTester/AAudioTester.apk
 # 4. (recommended) add privapp-permissions-com.example.aaudiotester.xml under /system/etc/permissions/
+#    include signature permissions: MODIFY_AUDIO_ROUTING / CAPTURE_AUDIO_OUTPUT / CAPTURE_AUDIO_HOTWORD
+#    (enables AAOS system usages and system sources ECHO_REFERENCE/HOTWORD)
 adb reboot                                      # 5. reboot to apply
 ```
 > For existing system deploys using the old `/data/aaudio_player_configs.json` / `/data/aaudio_recorder_configs.json`, merge them into the new `/data/aaudio_configs.json`.
