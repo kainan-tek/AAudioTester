@@ -69,11 +69,12 @@ object AAudioConstants {
             AudioAttributes.USAGE_ASSISTANCE_SONIFICATION to "AAUDIO_USAGE_ASSISTANCE_SONIFICATION",
             AudioAttributes.USAGE_GAME to "AAUDIO_USAGE_GAME",
             AudioAttributes.USAGE_ASSISTANT to "AAUDIO_USAGE_ASSISTANT",
-            // AAOS
-            1000 to "AAUDIO_USAGE_EMERGENCY",
-            1001 to "AAUDIO_USAGE_SAFETY",
-            1002 to "AAUDIO_USAGE_VEHICLE_STATUS",
-            1003 to "AAUDIO_USAGE_ANNOUNCEMENT"
+            // AAOS（对齐 NDK 的 AAUDIO_SYSTEM_USAGE_*，需 MODIFY_AUDIO_ROUTING 特权）
+            // 注：AudioAttributes.USAGE_EMERGENCY 等为 @hide 常量（SDK 不可见），故用字面量 1000-1003
+            1000 to "AAUDIO_SYSTEM_USAGE_EMERGENCY",
+            1001 to "AAUDIO_SYSTEM_USAGE_SAFETY",
+            1002 to "AAUDIO_SYSTEM_USAGE_VEHICLE_STATUS",
+            1003 to "AAUDIO_SYSTEM_USAGE_ANNOUNCEMENT"
         )
     }
 
