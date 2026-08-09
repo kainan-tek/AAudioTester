@@ -37,7 +37,6 @@ adb push AAudioTester.apk /system/priv-app/AAudioTester/AAudioTester.apk
 #    （授予后 AAOS 系统 usage 与系统音源 ECHO_REFERENCE/HOTWORD 才可用）
 adb reboot                                      # 5. 重启生效
 ```
-> 旧部署若曾用 `/data/aaudio_player_configs.json` / `/data/aaudio_recorder_configs.json`，需合并迁移到 `/data/aaudio_configs.json`。
 
 ## 构建与安装
 需 JDK 21；如换机构建，调整 `gradle.properties` 的 `org.gradle.java.home` 或设 `JAVA_HOME`。

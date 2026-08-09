@@ -37,7 +37,6 @@ adb push AAudioTester.apk /system/priv-app/AAudioTester/AAudioTester.apk
 #    (enables AAOS system usages and system sources ECHO_REFERENCE/HOTWORD)
 adb reboot                                      # 5. reboot to apply
 ```
-> For existing system deploys using the old `/data/aaudio_player_configs.json` / `/data/aaudio_recorder_configs.json`, merge them into the new `/data/aaudio_configs.json`.
 
 ## Build & Install
 JDK 21 required; adjust `org.gradle.java.home` in `gradle.properties` or set `JAVA_HOME` when building elsewhere.
