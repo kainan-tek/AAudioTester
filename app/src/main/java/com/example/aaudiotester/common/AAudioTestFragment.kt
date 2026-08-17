@@ -134,7 +134,7 @@ abstract class AAudioTestFragment : Fragment() {
     private fun reloadConfigurations() {
         val prevDesc = currentConfig?.description
         availableConfigs = try {
-            AAudioConfig.reloadConfigs(requireContext(), section)
+            AAudioConfig.loadConfigs(requireContext(), section)
         } catch (e: Exception) {
             android.util.Log.e("AAudioTestFragment", "Failed to reload $section configurations", e)
             emptyList()

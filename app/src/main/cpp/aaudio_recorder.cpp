@@ -1,4 +1,5 @@
 #include "aaudio_recorder.h"
+#include "ring_buffer.h"
 #include "wav_file.h"
 
 #include <sys/stat.h>
@@ -11,6 +12,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <aaudio/AAudio.h>
 
@@ -43,6 +46,12 @@ struct AudioRecorderState {
     std::unique_ptr<WavFile> wav_file;
     std::atomic<bool> is_recording{false};
     std::atomic<bool> callback_notified{false};  // true if Java already notified by callback
+
+    // 录音数据缓冲：回调(生产) → 写线程(消费)，把磁盘 I/O 移出实时回调。
+    std::unique_ptr<SpScRingBuffer> ring;
+    std::thread write_thread;
+    std::atomic<bool> stop_write_thread{false};
+    std::atomic<size_t> dropped_bytes{0};
 
     JavaVM *jvm = nullptr;
     jobject recorder_instance = nullptr;
@@ -132,6 +141,34 @@ static void notifyRecordingError(const std::string &error) {
     attach.env->CallVoidMethod(g_recorder.recorder_instance, g_recorder.on_recording_error_method,
                                error_str);
     attach.env->DeleteLocalRef(error_str);
+}
+
+// 停止写线程并 join（join 前写线程会排空缓冲中剩余数据落盘）。
+static void stopWriteThread() {
+    g_recorder.stop_write_thread.store(true, std::memory_order_release);
+    if (g_recorder.write_thread.joinable()) {
+        g_recorder.write_thread.join();
+    }
+}
+
+// 录音写线程：从环形缓冲取数据落盘；回调线程只 memcpy、永不碰磁盘。
+static void recordWriteThread() {
+    std::vector<char> buf(64 * 1024);
+    while (!g_recorder.stop_write_thread.load(std::memory_order_acquire)) {
+        const size_t n = g_recorder.ring->read(buf.data(), buf.size());
+        if (n == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        if (!g_recorder.wav_file->writeData(buf.data(), n)) {
+            LOGE("Failed to write audio data to WAV file");
+        }
+    }
+    // 退出前排空剩余数据，避免丢尾部。
+    size_t n;
+    while ((n = g_recorder.ring->read(buf.data(), buf.size())) > 0) {
+        g_recorder.wav_file->writeData(buf.data(), n);
+    }
 }
 
 static std::string generateTimestampedFilePath() {
@@ -231,9 +268,9 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream *stream,
     // Calculate bytes to write
     int32_t bytes_to_write = numFrames * channel_count * bytes_per_sample;
 
-    if (!g_recorder.wav_file->writeData(audioData, static_cast<size_t>(bytes_to_write))) {
-        LOGE("Failed to write audio data to WAV file");
-        // Continue recording even if write fails (might be temporary permission issue)
+    // 整帧要么全进缓冲、要么全丢（宁丢不阻塞），落盘由写线程负责。
+    if (!g_recorder.ring->tryWrite(static_cast<const char*>(audioData), static_cast<size_t>(bytes_to_write))) {
+        g_recorder.dropped_bytes.fetch_add(static_cast<size_t>(bytes_to_write), std::memory_order_relaxed);
     }
 
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
@@ -419,6 +456,8 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
 
     LOGI("startNativeRecording");
 
+    stopWriteThread();  // 清理上次 error 残留、尚未 join 的写线程（先排空旧数据再重建资源）
+
     g_recorder.callback_notified.store(false, std::memory_order_release);
 
     if (!createAAudioStream()) {
@@ -438,6 +477,12 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
         return JNI_FALSE;
     }
 
+    // 环形缓冲 + 写线程：回调只 memcpy 进缓冲，写线程负责落盘。
+    g_recorder.ring = std::make_unique<SpScRingBuffer>(kDefaultRingCapacity);
+    g_recorder.stop_write_thread.store(false, std::memory_order_release);
+    g_recorder.dropped_bytes.store(0, std::memory_order_relaxed);
+    g_recorder.write_thread = std::thread(recordWriteThread);
+
     // Set recording flag before starting stream to avoid race condition with callback
     g_recorder.is_recording.store(true, std::memory_order_release);
 
@@ -445,9 +490,11 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
     if (result != AAUDIO_OK) {
         LOGE("Failed to start recording stream: %s", AAudio_convertResultToText(result));
         g_recorder.is_recording.store(false, std::memory_order_release);
+        stopWriteThread();
         g_recorder.stream.reset();
         g_recorder.wav_file->close();
         g_recorder.wav_file.reset();
+        g_recorder.ring.reset();
         notifyRecordingError("[STREAM] Failed to start recording stream");
         return JNI_FALSE;
     }
@@ -481,9 +528,16 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv
         g_recorder.stream.reset();
     }
 
+    stopWriteThread();  // join 写线程：排空缓冲中剩余数据落盘
+
     if (g_recorder.wav_file) {
         g_recorder.wav_file->close();
         g_recorder.wav_file.reset();
+    }
+    g_recorder.ring.reset();
+
+    if (g_recorder.dropped_bytes.load(std::memory_order_relaxed) > 0) {
+        LOGW("Recording dropped bytes: %zu", g_recorder.dropped_bytes.load(std::memory_order_relaxed));
     }
 
     // Only notify stopped if callback hasn't already notified Java (error or EOF)
@@ -500,7 +554,10 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_releaseNative(JNIEnv *env,
                                                                       jobject thiz) {
     LOGI("releaseNative");
 
-    if (g_recorder.is_recording.load(std::memory_order_acquire)) {
+    // Clean up stream/WAV resources even if recording already ended (e.g. a stream error set
+    // is_recording false but left the WAV header unfinalized). stopNativeRecording resets
+    // stream/wav_file, so this condition also avoids re-running it after a normal stop.
+    if (g_recorder.stream || g_recorder.wav_file) {
         Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(env, thiz);
     }
 

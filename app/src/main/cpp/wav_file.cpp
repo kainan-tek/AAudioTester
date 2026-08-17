@@ -42,6 +42,7 @@ bool WavFile::openRead(const std::string& filePath) {
         return false;
     }
 
+    remaining_data_ = header_.subchunk2_size;
     is_open_ = true;
     LOGI("WAV file opened: %s, %s", filePath.c_str(), getFormatInfo().c_str());
     return true;
@@ -51,11 +52,18 @@ size_t WavFile::readAudioData(void* buffer, size_t bufferSize) {
     if (!is_open_ || !buffer || bufferSize == 0) {
         return 0;
     }
+    // 只读 data 区，不越过 data chunk 尾部（尾随元数据 chunk 否则会混入音频）。
+    bufferSize = std::min(bufferSize, remaining_data_);
+    if (bufferSize == 0) {
+        return 0;
+    }
     constexpr auto kMaxStreamSize = static_cast<size_t>(std::numeric_limits<std::streamsize>::max());
     size_t actual_read_size = std::min(bufferSize, kMaxStreamSize);
     auto read_size = static_cast<std::streamsize>(actual_read_size);
     in_.read(static_cast<char*>(buffer), read_size);
-    return static_cast<size_t>(in_.gcount());
+    const size_t n = static_cast<size_t>(in_.gcount());
+    remaining_data_ -= n;
+    return n;
 }
 
 bool WavFile::openWrite(const std::string& filePath, int32_t sampleRate,
@@ -113,6 +121,7 @@ void WavFile::close() {
     is_open_ = false;
     header_ = {};
     data_size_ = 0;
+    remaining_data_ = 0;
     write_format_ = AAUDIO_FORMAT_PCM_I16;
 }
 
@@ -150,6 +159,9 @@ std::string WavFile::getFormatInfo() const {
 }
 
 bool WavFile::isValidFormat() const {
+    // Only PCM (format 1) is accepted here, so a float WAV (format 3, written by writeHeader for
+    // PCM_FLOAT) could not be read back. In practice float is unreachable: the Kotlin layer maps
+    // 16/24/32-bit to I16/I24_PACKED/I32 only.
     return (header_.audio_format == 1 && header_.num_channels > 0 && header_.num_channels <= 16 &&
             header_.sample_rate > 0 && header_.sample_rate <= 192000 &&
             (header_.bits_per_sample == 16 || header_.bits_per_sample == 24 ||

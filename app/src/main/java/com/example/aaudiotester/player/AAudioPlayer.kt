@@ -111,13 +111,13 @@ class AAudioPlayer(context: Context) : AAudioEngine {
         if (state != State.PLAYING) return
         Log.d(TAG, "Stopping playback")
         stopNativePlayback()
-        abandonAudioFocus()
     }
 
     override fun isActive(): Boolean = state == State.PLAYING
 
     override fun release() {
         if (state == State.PLAYING) stop()
+        abandonAudioFocus()
         listener = null
         try {
             releaseNative()
@@ -183,6 +183,7 @@ class AAudioPlayer(context: Context) : AAudioEngine {
     @Suppress("unused")
     private fun onNativePlaybackStopped() {
         state = State.IDLE
+        abandonAudioFocus()
         listener?.onStopped()
         Log.i(TAG, "Playback stopped")
     }

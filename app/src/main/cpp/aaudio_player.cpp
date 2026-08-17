@@ -1,13 +1,17 @@
 #include "aaudio_player.h"
+#include "ring_buffer.h"
 #include "wav_file.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <aaudio/AAudio.h>
 
@@ -51,6 +55,13 @@ struct AudioPlayerState {
     std::unique_ptr<WavFile> wav_file;
     std::atomic<bool> is_playing{false};
     std::atomic<bool> callback_notified{false};  // true if Java already notified by callback
+
+    // 播放数据缓冲：读线程(生产) → 回调(消费)，把磁盘 I/O 移出实时回调。
+    std::unique_ptr<SpScRingBuffer> ring;
+    std::thread read_thread;
+    std::atomic<bool> eof_reached{false};
+    std::atomic<bool> stop_read_thread{false};
+    std::atomic<size_t> underrun_count{0};
 
     JavaVM* jvm = nullptr;
     jobject player_instance = nullptr;
@@ -188,6 +199,31 @@ static void notifyPlaybackError(const std::string& error) {
     attach.env->DeleteLocalRef(error_str);
 }
 
+// 停止读线程并 join（start 失败与正常 stop 共用）。
+static void stopReadThread() {
+    g_player.stop_read_thread.store(true, std::memory_order_release);
+    if (g_player.read_thread.joinable()) {
+        g_player.read_thread.join();
+    }
+}
+
+// 播放读线程：持续把 WAV 数据读入环形缓冲，回调线程只 memcpy、永不碰磁盘。
+static void playReadThread() {
+    std::vector<char> buf(64 * 1024);
+    while (!g_player.stop_read_thread.load(std::memory_order_acquire)) {
+        const size_t n = g_player.wav_file->readAudioData(buf.data(), buf.size());
+        if (n == 0) {  // 文件读尽
+            g_player.eof_reached.store(true, std::memory_order_release);
+            return;
+        }
+        size_t off = 0;
+        while (off < n && !g_player.stop_read_thread.load(std::memory_order_acquire)) {
+            off += g_player.ring->write(buf.data() + off, n - off);
+            if (off < n) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
+
 static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
                                                    void* userData,
                                                    void* audioData,
@@ -236,23 +272,21 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
     // Calculate bytes to read
     int32_t bytes_to_read = numFrames * channel_count * bytes_per_sample;
 
-    // Clear buffer first to prevent residual data
+    // 先清零：underrun 或尾部不足时自动补静音，避免残留旧数据。
     memset(audioData, 0, static_cast<size_t>(bytes_to_read));
 
-    size_t bytes_read = g_player.wav_file->readAudioData(audioData, static_cast<size_t>(bytes_to_read));
+    const size_t bytes_read =
+        g_player.ring->read(static_cast<char*>(audioData), static_cast<size_t>(bytes_to_read));
 
-    // bytes_read == 0 indicates end of file
     if (bytes_read == 0) {
-        g_player.is_playing.store(false, std::memory_order_release);
-        g_player.callback_notified.store(true, std::memory_order_release);
-        notifyPlaybackStopped();
-        return AAUDIO_CALLBACK_RESULT_STOP;
-    }
-
-    // Partial read (file ending), buffer already zero-filled
-    // Continue playing the remaining data, next callback will detect EOF
-    if (bytes_read < static_cast<size_t>(bytes_to_read)) {
-        return AAUDIO_CALLBACK_RESULT_CONTINUE;
+        // 缓冲空：数据已播尽(EOF) 或 读线程尚未填上(underrun，本次输出静音)。
+        if (g_player.eof_reached.load(std::memory_order_acquire)) {
+            g_player.is_playing.store(false, std::memory_order_release);
+            g_player.callback_notified.store(true, std::memory_order_release);
+            notifyPlaybackStopped();
+            return AAUDIO_CALLBACK_RESULT_STOP;
+        }
+        g_player.underrun_count.fetch_add(1, std::memory_order_relaxed);
     }
 
 #if LATENCY_TEST_ENABLE
@@ -450,6 +484,8 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
         return JNI_FALSE;
     }
 
+    stopReadThread();  // 清理上次 EOF/error 残留、尚未 join 的读线程，避免对 joinable 线程重新赋值触发 terminate
+
     g_player.callback_notified.store(false, std::memory_order_release);
 
     g_player.wav_file = std::make_unique<WavFile>();
@@ -465,6 +501,13 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
         notifyPlaybackError("[STREAM] Failed to create playback stream");
         return JNI_FALSE;
     }
+
+    // 环形缓冲 + 读线程：文件流式进入缓冲，回调只 memcpy（磁盘 I/O 移出实时线程）。
+    g_player.ring = std::make_unique<SpScRingBuffer>(kDefaultRingCapacity);
+    g_player.eof_reached.store(false, std::memory_order_release);
+    g_player.stop_read_thread.store(false, std::memory_order_release);
+    g_player.underrun_count.store(0, std::memory_order_relaxed);
+    g_player.read_thread = std::thread(playReadThread);
 
 #if LATENCY_TEST_ENABLE
     if (!initGpio()) {
@@ -487,8 +530,10 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
     if (result != AAUDIO_OK) {
         LOGE("Failed to start: %s", AAudio_convertResultToText(result));
         g_player.is_playing.store(false, std::memory_order_release);
+        stopReadThread();
         g_player.stream.reset();
         g_player.wav_file.reset();
+        g_player.ring.reset();
         notifyPlaybackError("[STREAM] Failed to start playback stream");
         return JNI_FALSE;
     }
@@ -502,6 +547,7 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
     LOGI("stopNativePlayback");
 
     g_player.is_playing.store(false, std::memory_order_release);
+    stopReadThread();
 
     if (g_player.stream) {
         aaudio_result_t result = AAudioStream_requestStop(g_player.stream.get());
@@ -519,6 +565,11 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
     }
 
     g_player.wav_file.reset();
+    g_player.ring.reset();
+
+    if (g_player.underrun_count.load(std::memory_order_relaxed) > 0) {
+        LOGW("Playback underruns: %zu", g_player.underrun_count.load(std::memory_order_relaxed));
+    }
 
 #if LATENCY_TEST_ENABLE
     closeGpio();
@@ -535,7 +586,10 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
 JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_releaseNative(JNIEnv* env, jobject thiz) {
     LOGI("Releasing AAudio player");
 
-    if (g_player.is_playing.load(std::memory_order_acquire)) {
+    // Clean up stream/WAV resources even if playback already ended (e.g. EOF set is_playing
+    // false but left the stream open). stopNativePlayback resets stream/wav_file to null, so
+    // this condition also avoids re-running it after a normal stop.
+    if (g_player.stream || g_player.wav_file) {
         Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(env, thiz);
     }
 

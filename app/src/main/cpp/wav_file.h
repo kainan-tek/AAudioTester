@@ -64,6 +64,7 @@ private:
     WavHeader header_{};
     bool is_open_ = false;
     uint32_t data_size_ = 0;
+    size_t remaining_data_ = 0;
     aaudio_format_t write_format_ = AAUDIO_FORMAT_PCM_I16;
 
     // 读辅助

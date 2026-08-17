@@ -32,9 +32,6 @@ data class AAudioConfig(
             getDefaultConfigs(section)
         }
 
-        fun reloadConfigs(context: Context, section: String): List<AAudioConfig> =
-            loadConfigs(context, section)
-
         /** 内部 seam，便于 JVM 单测。 */
         internal fun parseConfigs(jsonString: String, section: String): List<AAudioConfig> {
             val root = JSONObject(jsonString)
