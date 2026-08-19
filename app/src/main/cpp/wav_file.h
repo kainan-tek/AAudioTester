@@ -23,6 +23,8 @@ public:
     // 读模式（player）
     bool openRead(const std::string& filePath);
     size_t readAudioData(void* buffer, size_t bufferSize);
+    // 声明的 data 区未能完整读出（I/O 失败或文件截断）
+    [[nodiscard]] bool hasReadError() const { return read_error_; }
     int32_t getSampleRate() const;
     int32_t getChannelCount() const;
     aaudio_format_t getAAudioFormat() const;
@@ -37,7 +39,8 @@ public:
 
     // 公共
     bool isOpen() const;
-    void close();
+    // 写侧返回"回填头部 + 关闭"是否成功（失败 = 文件不可用，需按错误上报）；读侧恒 true
+    bool close();
 
 private:
 #pragma pack(push, 1)
@@ -65,6 +68,7 @@ private:
     bool is_open_ = false;
     uint32_t data_size_ = 0;
     size_t remaining_data_ = 0;
+    bool read_error_ = false;
     aaudio_format_t write_format_ = AAUDIO_FORMAT_PCM_I16;
 
     // 读辅助

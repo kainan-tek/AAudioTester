@@ -9,19 +9,16 @@ import com.example.aaudiotester.common.AAudioConfig
 import com.example.aaudiotester.common.AAudioConstants
 import com.example.aaudiotester.common.AAudioEngine
 import com.example.aaudiotester.common.AssetExtractor
+import java.util.concurrent.Executor
 
 /** 播放引擎：AAudio 输出 + 音频焦点管理。 */
-class AAudioPlayer(context: Context) : AAudioEngine {
+class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAudioEngine {
 
     companion object {
         private const val TAG = "AAudioPlayer"
         init {
-            try {
-                System.loadLibrary("aaudiotester")
-                Log.d(TAG, "Native library loaded")
-            } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "Failed to load native library", e)
-            }
+            // 加载失败时立即抛 UnsatisfiedLinkError（崩溃点即原因点），不吞错推迟到 external 调用处
+            System.loadLibrary("aaudiotester")
         }
     }
 
@@ -42,7 +39,8 @@ class AAudioPlayer(context: Context) : AAudioEngine {
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 Log.d(TAG, "Audio focus lost, stopping playback")
-                stop()
+                // 焦点回调在主线程：经 executor 与其他 native 调用串行，避免并发进入 stopNativePlayback
+                nativeExecutor.execute { stop() }
             }
         }
     }

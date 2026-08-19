@@ -6,6 +6,7 @@ import com.example.aaudiotester.common.AAudioConfig
 import com.example.aaudiotester.common.AAudioEngine
 import com.example.aaudiotester.common.AAudioMessages
 import com.example.aaudiotester.common.AAudioTestFragment
+import java.util.concurrent.Executor
 
 class RecorderFragment : AAudioTestFragment() {
 
@@ -18,7 +19,9 @@ class RecorderFragment : AAudioTestFragment() {
         failed = "Recording failed",
     )
 
-    override fun createEngine(context: Context): AAudioEngine = AAudioRecorder(context)
+    // Recorder 无音频焦点监听，不需要 executor
+    override fun createEngine(context: Context, engineExecutor: Executor): AAudioEngine =
+        AAudioRecorder(context)
 
     override fun requiredPermissions(): Array<String> = arrayOf(Manifest.permission.RECORD_AUDIO)
 

@@ -12,12 +12,8 @@ class AAudioRecorder(context: Context) : AAudioEngine {
     companion object {
         private const val TAG = "AAudioRecorder"
         init {
-            try {
-                System.loadLibrary("aaudiotester")
-                Log.d(TAG, "Native library loaded")
-            } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "Failed to load native library", e)
-            }
+            // 加载失败时立即抛 UnsatisfiedLinkError（崩溃点即原因点），不吞错推迟到 external 调用处
+            System.loadLibrary("aaudiotester")
         }
     }
 
@@ -43,11 +39,8 @@ class AAudioRecorder(context: Context) : AAudioEngine {
             Log.w(TAG, "Cannot change configuration while recording")
             return
         }
-        if (config.audioFilePath.isNotBlank() && !config.audioFilePath.endsWith(".wav")) {
-            Log.e(TAG, "Invalid output path: must be empty or end with .wav")
-            return
-        }
         currentConfig = config
+        // 非 .wav 结尾的路径由 native 层解释为目录并自动生成文件名；无效路径在 start 时报 [FILE] 错误
         val audioFilePath = config.audioFilePath.ifBlank { getDefaultDirectory() }
         setNativeConfig(
             AAudioConstants.getInputPreset(config.inputPreset),

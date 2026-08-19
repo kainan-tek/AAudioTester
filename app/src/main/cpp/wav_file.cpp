@@ -1,7 +1,6 @@
 #include "wav_file.h"
 
 #include <limits>
-#include <memory>
 #include <sstream>
 #include <cstring>
 
@@ -43,6 +42,7 @@ bool WavFile::openRead(const std::string& filePath) {
     }
 
     remaining_data_ = header_.subchunk2_size;
+    read_error_ = false;
     is_open_ = true;
     LOGI("WAV file opened: %s, %s", filePath.c_str(), getFormatInfo().c_str());
     return true;
@@ -62,6 +62,10 @@ size_t WavFile::readAudioData(void* buffer, size_t bufferSize) {
     auto read_size = static_cast<std::streamsize>(actual_read_size);
     in_.read(static_cast<char*>(buffer), read_size);
     const size_t n = static_cast<size_t>(in_.gcount());
+    if (n == 0 && remaining_data_ > 0) {
+        // 声明的 data 区未读完即止：I/O 失败或文件被截断（区别于正常读尽）
+        read_error_ = true;
+    }
     remaining_data_ -= n;
     return n;
 }
@@ -95,25 +99,32 @@ bool WavFile::writeData(const void* data, size_t size) {
     if (!is_open_ || !data || size == 0) {
         return false;
     }
+    // 4GB 是 WAV 32 位 size 字段上限；须写前检查——写后再查则末块已入盘且 data_size_ 已回绕
+    if (static_cast<uint64_t>(data_size_) + size > std::numeric_limits<uint32_t>::max()) {
+        LOGE("Data size exceeds 4GB WAV limit, refusing write (file finalized at limit)");
+        return false;
+    }
     out_.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
     if (out_.fail()) {
         LOGE("Failed to write data to WAV file");
         return false;
     }
-    uint32_t prev = data_size_;
     data_size_ += static_cast<uint32_t>(size);
-    if (data_size_ < prev) {
-        LOGE("Data size overflow detected, stopping recording");
-        return false;
-    }
     return true;
 }
 
-void WavFile::close() {
+bool WavFile::close() {
+    bool ok = true;
     if (out_.is_open()) {
         writeHeader(data_size_);
+        ok = !out_.fail();
         out_.close();
-        LOGI("WAV file closed: %s, final size: %u bytes", file_path_.c_str(), data_size_);
+        ok = ok && !out_.fail();
+        if (ok) {
+            LOGI("WAV file closed: %s, final size: %u bytes", file_path_.c_str(), data_size_);
+        } else {
+            LOGE("Failed to finalize WAV file: %s (header backfill or close failed)", file_path_.c_str());
+        }
     }
     if (in_.is_open()) {
         in_.close();
@@ -123,6 +134,7 @@ void WavFile::close() {
     data_size_ = 0;
     remaining_data_ = 0;
     write_format_ = AAUDIO_FORMAT_PCM_I16;
+    return ok;
 }
 
 bool WavFile::isOpen() const {
@@ -228,6 +240,11 @@ bool WavFile::readFmtChunk() {
         }
 
         if (strncmp(chunk_id, "fmt ", 4) == 0) {
+            if (chunk_size < 16) {
+                // 不足 16 字节时字段读取会越过 chunk 边界，参数全为垃圾值
+                LOGE("Invalid fmt chunk size: %u", chunk_size);
+                return false;
+            }
             strncpy(header_.subchunk1_id, chunk_id, 4);
             in_.read(reinterpret_cast<char*>(&header_.audio_format), 2);
             in_.read(reinterpret_cast<char*>(&header_.num_channels), 2);

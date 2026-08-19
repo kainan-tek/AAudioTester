@@ -23,9 +23,12 @@ object AssetExtractor {
         val target = File(context.filesDir, assetPath)
         if (!target.exists()) {
             target.parentFile?.mkdirs()
+            // 先写临时文件再原子重命名：中途被杀不会留下截断文件被 exists() 误判为完整
+            val tmp = File(context.filesDir, "$assetPath.tmp")
             context.assets.open(assetPath).use { input ->
-                target.outputStream().use { output -> input.copyTo(output) }
+                tmp.outputStream().use { output -> input.copyTo(output) }
             }
+            if (!tmp.renameTo(target)) tmp.delete() // 目标已存在等罕见情形：清残骸，复用现有目标
             Log.i(TAG, "Extracted asset $assetPath -> ${target.absolutePath}")
         }
         return target.absolutePath

@@ -5,6 +5,7 @@ import com.example.aaudiotester.common.AAudioConfig
 import com.example.aaudiotester.common.AAudioEngine
 import com.example.aaudiotester.common.AAudioMessages
 import com.example.aaudiotester.common.AAudioTestFragment
+import java.util.concurrent.Executor
 
 class PlayerFragment : AAudioTestFragment() {
 
@@ -17,7 +18,8 @@ class PlayerFragment : AAudioTestFragment() {
         failed = "Playback failed",
     )
 
-    override fun createEngine(context: Context): AAudioEngine = AAudioPlayer(context)
+    override fun createEngine(context: Context, engineExecutor: Executor): AAudioEngine =
+        AAudioPlayer(context, engineExecutor)
 
     override fun requiredPermissions(): Array<String> = emptyArray()
 

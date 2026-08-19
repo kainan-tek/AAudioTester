@@ -17,13 +17,15 @@ import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import com.example.aaudiotester.R
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 
 /**
  * 抽象基类：共享全部 UI 接线（状态/按钮/Spinner/信息区/权限/互斥）。
  */
 abstract class AAudioTestFragment : Fragment() {
 
-    protected abstract fun createEngine(context: Context): AAudioEngine
+    protected abstract fun createEngine(context: Context, engineExecutor: Executor): AAudioEngine
     protected abstract val section: String                       // "player" / "recorder"
     protected abstract val messages: AAudioMessages
     protected abstract fun requiredPermissions(): Array<String>
@@ -31,6 +33,10 @@ abstract class AAudioTestFragment : Fragment() {
     protected abstract fun friendlyErrorMessage(raw: String): String
 
     private lateinit var engine: AAudioEngine
+
+    // native 层为全局单例状态：所有触碰 native 的调用（setAudioConfig/start/stop/release）
+    // 经此单线程串行执行，既消除并发竞争，也避免阻塞主线程
+    private val engineExecutor = Executors.newSingleThreadExecutor()
     private lateinit var statusText: TextView
     private lateinit var infoText: TextView
     private lateinit var startButton: Button
@@ -52,17 +58,10 @@ abstract class AAudioTestFragment : Fragment() {
             }
         }
 
-    override fun onCreateView(
-        inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
-    ): View {
-        val root = inflater.inflate(R.layout.fragment_audio_test, container, false)
-        statusText = root.findViewById(R.id.statusTextView)
-        infoText = root.findViewById(R.id.infoTextView)
-        startButton = root.findViewById(R.id.startButton)
-        stopButton = root.findViewById(R.id.stopButton)
-        configSpinner = root.findViewById(R.id.configSpinner)
-
-        engine = createEngine(requireActivity().applicationContext)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // engine 绑定 Fragment 生命周期：view 重建不换实例，原生全局态无新旧实例交叠
+        engine = createEngine(requireActivity().applicationContext, engineExecutor)
         engine.setListener(object : AAudioEngine.Listener {
             override fun onStarted() {
                 activity?.runOnUiThread {
@@ -83,6 +82,17 @@ abstract class AAudioTestFragment : Fragment() {
                 }
             }
         })
+    }
+
+    override fun onCreateView(
+        inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
+    ): View {
+        val root = inflater.inflate(R.layout.fragment_audio_test, container, false)
+        statusText = root.findViewById(R.id.statusTextView)
+        infoText = root.findViewById(R.id.infoTextView)
+        startButton = root.findViewById(R.id.startButton)
+        stopButton = root.findViewById(R.id.stopButton)
+        configSpinner = root.findViewById(R.id.configSpinner)
 
         startButton.setOnClickListener {
             val missing = requiredPermissions().filter {
@@ -91,7 +101,7 @@ abstract class AAudioTestFragment : Fragment() {
             if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
             else startInternal()
         }
-        stopButton.setOnClickListener { engine.stop() }
+        stopButton.setOnClickListener { engineExecutor.execute { engine.stop() } }
         configSpinner.setOnLongClickListener {
             reloadConfigurations()
             true
@@ -108,8 +118,8 @@ abstract class AAudioTestFragment : Fragment() {
             return
         }
         statusText.text = messages.preparing
-        val ok = engine.start()
-        if (ok) updateButtons(true)
+        startButton.isEnabled = false  // 防双击；按钮状态由 onStarted/onError 回调恢复
+        engineExecutor.execute { engine.start() }
     }
 
     private fun loadConfigurations() {
@@ -121,7 +131,7 @@ abstract class AAudioTestFragment : Fragment() {
         }
         if (availableConfigs.isNotEmpty()) {
             currentConfig = availableConfigs[0]
-            engine.setAudioConfig(currentConfig!!)
+            engineExecutor.execute { engine.setAudioConfig(currentConfig!!) }
             setupSpinner()
             updateInfo()
             statusText.text = messages.ready
@@ -142,7 +152,7 @@ abstract class AAudioTestFragment : Fragment() {
         if (availableConfigs.isNotEmpty()) {
             currentConfig = prevDesc?.let { d -> availableConfigs.find { it.description == d } }
                 ?: availableConfigs[0]
-            engine.setAudioConfig(currentConfig!!)
+            engineExecutor.execute { engine.setAudioConfig(currentConfig!!) }
             spinnerInitialized = false
             setupSpinner()
             updateInfo()
@@ -174,7 +184,7 @@ abstract class AAudioTestFragment : Fragment() {
                 }
                 val selected = availableConfigs[position]
                 currentConfig = selected
-                engine.setAudioConfig(selected)
+                engineExecutor.execute { engine.setAudioConfig(selected) }
                 updateInfo()
                 toast("Switched to: ${selected.description}")
             }
@@ -210,11 +220,13 @@ abstract class AAudioTestFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
-        engine.stop()
+        engineExecutor.execute { engine.stop() }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        if (::engine.isInitialized) engine.release()
+        // FIFO：排在未完成的 stop 之后，原生资源（GlobalRef 等）最终释放
+        engineExecutor.execute { engine.release() }
+        engineExecutor.shutdown()
     }
 }

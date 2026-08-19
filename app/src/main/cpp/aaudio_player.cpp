@@ -2,30 +2,17 @@
 #include "ring_buffer.h"
 #include "wav_file.h"
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
-#include <limits>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <aaudio/AAudio.h>
 
-namespace {
-
-struct AAudioStreamDeleter {
-    void operator()(AAudioStream* s) const {
-        if (s)
-            AAudioStream_close(s);
-    }
-};
-using AAudioStreamPtr = std::unique_ptr<AAudioStream, AAudioStreamDeleter>;
-
-}  // namespace
+#include "aaudio_common.h"
 
 #define LATENCY_TEST_ENABLE 0
 
@@ -51,7 +38,7 @@ using AAudioStreamPtr = std::unique_ptr<AAudioStream, AAudioStreamDeleter>;
  * All state modifications are serialized through JNI method calls
  */
 struct AudioPlayerState {
-    AAudioStreamPtr stream;
+    aaudio_common::AAudioStreamPtr stream;
     std::unique_ptr<WavFile> wav_file;
     std::atomic<bool> is_playing{false};
     std::atomic<bool> callback_notified{false};  // true if Java already notified by callback
@@ -142,61 +129,19 @@ static inline void toggleGpio() {
 }
 #endif
 
-// RAII helper: attach current thread to JVM if needed, detach on destruction
-struct JniThreadAttachment {
-    JavaVM* jvm;
-    JNIEnv* env = nullptr;
-    bool attached = false;
-
-    explicit JniThreadAttachment(JavaVM* vm) : jvm(vm) {
-        if (jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
-            if (jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
-                attached = true;
-            }
-        }
-    }
-    ~JniThreadAttachment() {
-        if (attached) {
-            jvm->DetachCurrentThread();
-        }
-    }
-    [[nodiscard]] bool ok() const { return env != nullptr; }
-};
-
-static void notifyJavaCallback(jmethodID method, const char* name) {
-    if (!g_player.jvm || !g_player.player_instance || !method) {
-        LOGW("Cannot notify %s: JNI references not set", name);
-        return;
-    }
-    JniThreadAttachment attach(g_player.jvm);
-    if (!attach.ok()) {
-        LOGW("Failed to attach thread for JNI callback");
-        return;
-    }
-    attach.env->CallVoidMethod(g_player.player_instance, method);
-}
-
 static void notifyPlaybackStarted() {
-    notifyJavaCallback(g_player.on_playback_started_method, "playback started");
+    aaudio_common::callVoidMethod(g_player.jvm, g_player.player_instance, g_player.on_playback_started_method,
+                                  "playback started");
 }
 
 static void notifyPlaybackStopped() {
-    notifyJavaCallback(g_player.on_playback_stopped_method, "playback stopped");
+    aaudio_common::callVoidMethod(g_player.jvm, g_player.player_instance, g_player.on_playback_stopped_method,
+                                  "playback stopped");
 }
 
 static void notifyPlaybackError(const std::string& error) {
-    if (!g_player.jvm || !g_player.player_instance || !g_player.on_playback_error_method) {
-        LOGW("Cannot notify playback error: JNI references not set");
-        return;
-    }
-    JniThreadAttachment attach(g_player.jvm);
-    if (!attach.ok()) {
-        LOGW("Failed to attach thread for JNI callback");
-        return;
-    }
-    jstring error_str = attach.env->NewStringUTF(error.c_str());
-    attach.env->CallVoidMethod(g_player.player_instance, g_player.on_playback_error_method, error_str);
-    attach.env->DeleteLocalRef(error_str);
+    aaudio_common::notifyErrorToJava(g_player.jvm, g_player.player_instance, g_player.on_playback_error_method,
+                                     error, "playback error");
 }
 
 // 停止读线程并 join（start 失败与正常 stop 共用）。
@@ -212,8 +157,15 @@ static void playReadThread() {
     std::vector<char> buf(64 * 1024);
     while (!g_player.stop_read_thread.load(std::memory_order_acquire)) {
         const size_t n = g_player.wav_file->readAudioData(buf.data(), buf.size());
-        if (n == 0) {  // 文件读尽
-            g_player.eof_reached.store(true, std::memory_order_release);
+        if (n == 0) {
+            if (g_player.wav_file->hasReadError()) {
+                // I/O 错误或文件截断：按错误上报，而非伪装成正常 EOF
+                g_player.is_playing.store(false, std::memory_order_release);
+                g_player.callback_notified.store(true, std::memory_order_release);
+                notifyPlaybackError("[FILE] Audio read failed or file truncated");
+                return;
+            }
+            g_player.eof_reached.store(true, std::memory_order_release);  // 文件读尽
             return;
         }
         size_t off = 0;
@@ -239,35 +191,18 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
 
-    // Validate numFrames
-    if (numFrames <= 0) {
-        LOGE("Invalid numFrames: %d", numFrames);
-        return AAUDIO_CALLBACK_RESULT_STOP;
-    }
-
+    // 回调参数守卫：清状态并通知，与上方文件异常分支模式一致（原裸 return 会致 UI 卡“进行中”）
     int32_t channel_count = AAudioStream_getChannelCount(stream);
-    if (channel_count <= 0 || channel_count > 16) {
-        LOGE("Invalid channel count: %d", channel_count);
+    if (numFrames <= 0 || channel_count <= 0 || channel_count > 16) {
+        LOGE("Invalid callback args: numFrames=%d, channelCount=%d", numFrames, channel_count);
+        g_player.is_playing.store(false, std::memory_order_release);
+        g_player.callback_notified.store(true, std::memory_order_release);
+        notifyPlaybackError("[STREAM] Invalid callback args from stream");
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
 
     // Get bytes per sample based on format
-    int32_t bytes_per_sample;
-    switch (AAudioStream_getFormat(stream)) {
-        case AAUDIO_FORMAT_PCM_I16:
-            bytes_per_sample = 2;
-            break;
-        case AAUDIO_FORMAT_PCM_I24_PACKED:
-            bytes_per_sample = 3;
-            break;
-        case AAUDIO_FORMAT_PCM_I32:
-        case AAUDIO_FORMAT_PCM_FLOAT:
-            bytes_per_sample = 4;
-            break;
-        default:
-            bytes_per_sample = 2;
-            break;
-    }
+    const int32_t bytes_per_sample = aaudio_common::bytesPerSample(AAudioStream_getFormat(stream));
 
     // Calculate bytes to read
     int32_t bytes_to_read = numFrames * channel_count * bytes_per_sample;
@@ -351,10 +286,8 @@ static bool createAAudioStream() {
     AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
     AAudioStreamBuilder_setPerformanceMode(builder, g_player.performance_mode);
 
-    int32_t buffer_capacity = (g_player.performance_mode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY)
-                                  ? (sample_rate * 40) / 1000
-                                  : (sample_rate * 100) / 1000;
-    AAudioStreamBuilder_setBufferCapacityInFrames(builder, buffer_capacity);
+    AAudioStreamBuilder_setBufferCapacityInFrames(
+        builder, aaudio_common::bufferCapacityFrames(sample_rate, g_player.performance_mode));
 
     AAudioStreamBuilder_setDataCallback(builder, audioCallback, nullptr);
     AAudioStreamBuilder_setErrorCallback(builder, errorCallback, nullptr);
@@ -368,17 +301,27 @@ static bool createAAudioStream() {
     }
     g_player.stream.reset(raw_stream);
 
-    int32_t frames_per_burst = AAudioStream_getFramesPerBurst(g_player.stream.get());
-    if (frames_per_burst > 0) {
-        int32_t optimal_size =
-            frames_per_burst * (g_player.performance_mode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY ? 2 : 4);
-        optimal_size = std::min(optimal_size, AAudioStream_getBufferCapacityInFrames(g_player.stream.get()));
-        AAudioStream_setBufferSizeInFrames(g_player.stream.get(), optimal_size);
-    }
+    aaudio_common::optimizeBufferSize(g_player.stream.get(), g_player.performance_mode);
 
-    LOGI("Stream created: %dHz, %dch, format=%d, mode=%d", AAudioStream_getSampleRate(g_player.stream.get()),
-         AAudioStream_getChannelCount(g_player.stream.get()), AAudioStream_getFormat(g_player.stream.get()),
-         AAudioStream_getPerformanceMode(g_player.stream.get()));
+    int32_t actual_rate = AAudioStream_getSampleRate(g_player.stream.get());
+    int32_t actual_channels = AAudioStream_getChannelCount(g_player.stream.get());
+    aaudio_format_t actual_format = AAudioStream_getFormat(g_player.stream.get());
+
+    LOGI("Stream created: %dHz, %dch, format=%d, mode=%d", actual_rate, actual_channels,
+         actual_format, AAudioStream_getPerformanceMode(g_player.stream.get()));
+
+    // 流实际声道/格式与 WAV 不一致时按错误处理：回调按流格式消费字节，而 ring 中是
+    // 文件格式布局，不一致会导致变调/噪声且无提示（recorder 侧通过 actual 回写规避）。
+    if (actual_channels != channel_count || actual_format != format) {
+        LOGE("Stream params mismatch: requested %dch/fmt%d, actual %dch/fmt%d", channel_count,
+             format, actual_channels, actual_format);
+        g_player.stream.reset();
+        return false;
+    }
+    // 采样率由框架自动重采样，仅告警（个别设备 openStream 返回重采样后的 rate）
+    if (actual_rate != sample_rate) {
+        LOGW("Sample rate adapted: %d requested, %d actual", sample_rate, actual_rate);
+    }
 
     return true;
 }
@@ -438,6 +381,11 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_ini
             env->ReleaseStringUTFChars(filePath, path);
         } else {
             LOGE("Failed to get file path string");
+            // 与本函数上方失败路径一致：清掉 GlobalRef，避免泄漏
+            if (g_player.player_instance) {
+                env->DeleteGlobalRef(g_player.player_instance);
+                g_player.player_instance = nullptr;
+            }
             return JNI_FALSE;
         }
     }
@@ -550,17 +498,7 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
     stopReadThread();
 
     if (g_player.stream) {
-        aaudio_result_t result = AAudioStream_requestStop(g_player.stream.get());
-        if (result != AAUDIO_OK) {
-            LOGW("Failed to request stop: %s", AAudio_convertResultToText(result));
-        } else {
-            aaudio_stream_state_t state = AAUDIO_STREAM_STATE_STOPPING;
-            result =
-                AAudioStream_waitForStateChange(g_player.stream.get(), AAUDIO_STREAM_STATE_STOPPING, &state, 100000000);
-            if (result != AAUDIO_OK) {
-                LOGW("Failed to wait for stop: %s", AAudio_convertResultToText(result));
-            }
-        }
+        aaudio_common::stopStreamAndWait(g_player.stream.get());
         g_player.stream.reset();
     }
 

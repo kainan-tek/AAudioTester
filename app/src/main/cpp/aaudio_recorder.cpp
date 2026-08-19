@@ -2,12 +2,8 @@
 #include "ring_buffer.h"
 #include "wav_file.h"
 
-#include <sys/stat.h>
-
-#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <iomanip>
 #include <memory>
 #include <sstream>
@@ -17,17 +13,7 @@
 
 #include <aaudio/AAudio.h>
 
-namespace {
-
-    struct AAudioStreamDeleter {
-        void operator()(AAudioStream *s) const {
-            if (s) AAudioStream_close(s);
-        }
-    };
-
-    using AAudioStreamPtr = std::unique_ptr<AAudioStream, AAudioStreamDeleter>;
-
-}  // namespace
+#include "aaudio_common.h"
 
 /**
  * Global audio recorder state
@@ -42,7 +28,7 @@ namespace {
  * All state modifications are serialized through JNI method calls
  */
 struct AudioRecorderState {
-    AAudioStreamPtr stream;
+    aaudio_common::AAudioStreamPtr stream;
     std::unique_ptr<WavFile> wav_file;
     std::atomic<bool> is_recording{false};
     std::atomic<bool> callback_notified{false};  // true if Java already notified by callback
@@ -83,64 +69,19 @@ void aaudio_recorder_set_jvm(JavaVM* vm) {
     g_recorder.jvm = vm;
 }
 
-// RAII helper: attach current thread to JVM if needed, detach on destruction
-struct JniThreadAttachment {
-    JavaVM *jvm;
-    JNIEnv *env = nullptr;
-    bool attached = false;
-
-    explicit JniThreadAttachment(JavaVM *vm) : jvm(vm) {
-        if (jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
-            if (jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
-                attached = true;
-            }
-        }
-    }
-
-    ~JniThreadAttachment() {
-        if (attached) {
-            jvm->DetachCurrentThread();
-        }
-    }
-
-    [[nodiscard]] bool ok() const { return env != nullptr; }
-};
-
-static void notifyJavaCallback(jmethodID method, const char* name) {
-    if (!g_recorder.jvm || !g_recorder.recorder_instance || !method) {
-        LOGW("Cannot notify %s: JNI references not set", name);
-        return;
-    }
-    JniThreadAttachment attach(g_recorder.jvm);
-    if (!attach.ok()) {
-        LOGW("Failed to attach thread for JNI callback");
-        return;
-    }
-    attach.env->CallVoidMethod(g_recorder.recorder_instance, method);
-}
-
 static void notifyRecordingStarted() {
-    notifyJavaCallback(g_recorder.on_recording_started_method, "recording started");
+    aaudio_common::callVoidMethod(g_recorder.jvm, g_recorder.recorder_instance,
+                                  g_recorder.on_recording_started_method, "recording started");
 }
 
 static void notifyRecordingStopped() {
-    notifyJavaCallback(g_recorder.on_recording_stopped_method, "recording stopped");
+    aaudio_common::callVoidMethod(g_recorder.jvm, g_recorder.recorder_instance,
+                                  g_recorder.on_recording_stopped_method, "recording stopped");
 }
 
 static void notifyRecordingError(const std::string &error) {
-    if (!g_recorder.jvm || !g_recorder.recorder_instance || !g_recorder.on_recording_error_method) {
-        LOGW("Cannot notify recording error: JNI references not set");
-        return;
-    }
-    JniThreadAttachment attach(g_recorder.jvm);
-    if (!attach.ok()) {
-        LOGW("Failed to attach thread for JNI callback");
-        return;
-    }
-    jstring error_str = attach.env->NewStringUTF(error.c_str());
-    attach.env->CallVoidMethod(g_recorder.recorder_instance, g_recorder.on_recording_error_method,
-                               error_str);
-    attach.env->DeleteLocalRef(error_str);
+    aaudio_common::notifyErrorToJava(g_recorder.jvm, g_recorder.recorder_instance,
+                                     g_recorder.on_recording_error_method, error, "recording error");
 }
 
 // 停止写线程并 join（join 前写线程会排空缓冲中剩余数据落盘）。
@@ -154,20 +95,34 @@ static void stopWriteThread() {
 // 录音写线程：从环形缓冲取数据落盘；回调线程只 memcpy、永不碰磁盘。
 static void recordWriteThread() {
     std::vector<char> buf(64 * 1024);
+    size_t dropped_bytes = 0;
+    bool save_failed = false;
+    // 主循环与退出排空共用：失败一次后流带 failbit，跳过重试零开销；录音继续，数据不再落盘。
+    // 实际保存量由 close() 回填的 WAV 头记录，无需在此重复统计。
+    auto writeOut = [&](const char *data, size_t n) {
+        if (save_failed || !g_recorder.wav_file->writeData(data, n)) {
+            if (!save_failed) {
+                save_failed = true;
+                LOGE("File write failed - recording continues without saving");
+            }
+            dropped_bytes += n;
+        }
+    };
     while (!g_recorder.stop_write_thread.load(std::memory_order_acquire)) {
         const size_t n = g_recorder.ring->read(buf.data(), buf.size());
         if (n == 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
-        if (!g_recorder.wav_file->writeData(buf.data(), n)) {
-            LOGE("Failed to write audio data to WAV file");
-        }
+        writeOut(buf.data(), n);
     }
     // 退出前排空剩余数据，避免丢尾部。
     size_t n;
     while ((n = g_recorder.ring->read(buf.data(), buf.size())) > 0) {
-        g_recorder.wav_file->writeData(buf.data(), n);
+        writeOut(buf.data(), n);
+    }
+    if (save_failed) {
+        LOGW("Recording finished: %zu bytes not saved (file write failed)", dropped_bytes);
     }
 }
 
@@ -235,35 +190,18 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream *stream,
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
 
-    // Validate numFrames
-    if (numFrames <= 0) {
-        LOGE("Invalid numFrames: %d", numFrames);
-        return AAUDIO_CALLBACK_RESULT_STOP;
-    }
-
+    // 回调参数守卫：清状态并通知，与上方文件异常分支模式一致（原裸 return 会致 UI 卡“进行中”）
     int32_t channel_count = AAudioStream_getChannelCount(stream);
-    if (channel_count <= 0 || channel_count > 16) {
-        LOGE("Invalid channel count: %d", channel_count);
+    if (numFrames <= 0 || channel_count <= 0 || channel_count > 16) {
+        LOGE("Invalid callback args: numFrames=%d, channelCount=%d", numFrames, channel_count);
+        g_recorder.is_recording.store(false, std::memory_order_release);
+        g_recorder.callback_notified.store(true, std::memory_order_release);
+        notifyRecordingError("[STREAM] Invalid callback args from stream");
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
 
     // Get bytes per sample based on format
-    int32_t bytes_per_sample;
-    switch (AAudioStream_getFormat(stream)) {
-        case AAUDIO_FORMAT_PCM_I16:
-            bytes_per_sample = 2;
-            break;
-        case AAUDIO_FORMAT_PCM_I24_PACKED:
-            bytes_per_sample = 3;
-            break;
-        case AAUDIO_FORMAT_PCM_I32:
-        case AAUDIO_FORMAT_PCM_FLOAT:
-            bytes_per_sample = 4;
-            break;
-        default:
-            bytes_per_sample = 2;
-            break;
-    }
+    const int32_t bytes_per_sample = aaudio_common::bytesPerSample(AAudioStream_getFormat(stream));
 
     // Calculate bytes to write
     int32_t bytes_to_write = numFrames * channel_count * bytes_per_sample;
@@ -304,10 +242,8 @@ static bool createAAudioStream() {
     AAudioStreamBuilder_setInputPreset(builder, g_recorder.input_preset);
 
     // Set buffer capacity based on performance mode
-    int32_t buffer_capacity = (g_recorder.performance_mode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY)
-                              ? (g_recorder.sample_rate * 40) / 1000    // 40ms for low latency
-                              : (g_recorder.sample_rate * 100) / 1000;  // 100ms for power saving
-    AAudioStreamBuilder_setBufferCapacityInFrames(builder, buffer_capacity);
+    AAudioStreamBuilder_setBufferCapacityInFrames(
+            builder, aaudio_common::bufferCapacityFrames(g_recorder.sample_rate, g_recorder.performance_mode));
 
     AAudioStreamBuilder_setDataCallback(builder, audioCallback, nullptr);
     AAudioStreamBuilder_setErrorCallback(builder, errorCallback, nullptr);
@@ -321,15 +257,7 @@ static bool createAAudioStream() {
     }
     g_recorder.stream.reset(raw_stream);
 
-    int32_t frames_per_burst = AAudioStream_getFramesPerBurst(g_recorder.stream.get());
-    if (frames_per_burst > 0) {
-        int32_t optimal_size =
-                frames_per_burst *
-                (g_recorder.performance_mode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY ? 2 : 4);
-        optimal_size = std::min(optimal_size,
-                                AAudioStream_getBufferCapacityInFrames(g_recorder.stream.get()));
-        AAudioStream_setBufferSizeInFrames(g_recorder.stream.get(), optimal_size);
-    }
+    aaudio_common::optimizeBufferSize(g_recorder.stream.get(), g_recorder.performance_mode);
 
     int32_t actual_sample_rate = AAudioStream_getSampleRate(g_recorder.stream.get());
     int32_t actual_channel_count = AAudioStream_getChannelCount(g_recorder.stream.get());
@@ -512,27 +440,20 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv
     g_recorder.is_recording.store(false, std::memory_order_release);
 
     if (g_recorder.stream) {
-        aaudio_result_t result = AAudioStream_requestStop(g_recorder.stream.get());
-        if (result != AAUDIO_OK) {
-            LOGW("Failed to request stop: %s", AAudio_convertResultToText(result));
-        } else {
-            aaudio_stream_state_t state = AAUDIO_STREAM_STATE_STOPPING;
-            result =
-                    AAudioStream_waitForStateChange(g_recorder.stream.get(),
-                                                    AAUDIO_STREAM_STATE_STOPPING, &state,
-                                                    100000000);
-            if (result != AAUDIO_OK) {
-                LOGW("Failed to wait for stop: %s", AAudio_convertResultToText(result));
-            }
-        }
+        aaudio_common::stopStreamAndWait(g_recorder.stream.get());
         g_recorder.stream.reset();
     }
 
     stopWriteThread();  // join 写线程：排空缓冲中剩余数据落盘
 
     if (g_recorder.wav_file) {
-        g_recorder.wav_file->close();
+        const bool finalized = g_recorder.wav_file->close();
         g_recorder.wav_file.reset();
+        if (!finalized) {
+            // 回填头部失败：录音数据未完整落盘，按错误上报而非伪装成正常结束
+            g_recorder.callback_notified.store(true, std::memory_order_release);
+            notifyRecordingError("[FILE] Failed to finalize recording file (header write failed)");
+        }
     }
     g_recorder.ring.reset();
 
