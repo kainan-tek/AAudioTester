@@ -24,15 +24,13 @@ extern "C" {
  */
 
 /**
- * Initialize the audio player with the specified file path
+ * Initialize the audio player
  * @param env JNI environment
  * @param thiz Java object instance
- * @param filePath Path to the audio file to play
  * @return JNI_TRUE if initialization successful, JNI_FALSE otherwise
  */
 JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_initializeNative(JNIEnv* env,
-                                                                                              jobject thiz,
-                                                                                              jstring filePath);
+                                                                                              jobject thiz);
 
 /**
  * Start audio playback

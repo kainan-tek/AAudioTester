@@ -76,6 +76,9 @@ abstract class AAudioTestFragment : Fragment() {
                 }
             }
             override fun onError(error: String) {
+                // 错误后主动清理残留资源（ERROR 态 stop 可进入：关流、join 线程、回填 WAV 头）；
+                // 会话仍健康时（如 "Already active" 提示）不清理
+                if (!engine.isActive()) engineExecutor.execute { engine.stop() }
                 activity?.runOnUiThread {
                     if (!isAdded) return@runOnUiThread
                     updateButtons(false); showError(error)
@@ -123,12 +126,7 @@ abstract class AAudioTestFragment : Fragment() {
     }
 
     private fun loadConfigurations() {
-        availableConfigs = try {
-            AAudioConfig.loadConfigs(requireContext(), section)
-        } catch (e: Exception) {
-            android.util.Log.e("AAudioTestFragment", "Failed to load $section configurations", e)
-            emptyList()
-        }
+        availableConfigs = AAudioConfig.loadConfigs(requireContext(), section)
         if (availableConfigs.isNotEmpty()) {
             currentConfig = availableConfigs[0]
             engineExecutor.execute { engine.setAudioConfig(currentConfig!!) }
@@ -143,12 +141,7 @@ abstract class AAudioTestFragment : Fragment() {
 
     private fun reloadConfigurations() {
         val prevDesc = currentConfig?.description
-        availableConfigs = try {
-            AAudioConfig.loadConfigs(requireContext(), section)
-        } catch (e: Exception) {
-            android.util.Log.e("AAudioTestFragment", "Failed to reload $section configurations", e)
-            emptyList()
-        }
+        availableConfigs = AAudioConfig.loadConfigs(requireContext(), section)
         if (availableConfigs.isNotEmpty()) {
             currentConfig = prevDesc?.let { d -> availableConfigs.find { it.description == d } }
                 ?: availableConfigs[0]

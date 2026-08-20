@@ -84,9 +84,11 @@ class AAudioRecorder(context: Context) : AAudioEngine {
     }
 
     override fun stop() {
-        if (state != State.RECORDING) return
+        // ERROR 态也进入：清理错误残留的流/文件/写线程（由 Fragment.onError 触发）
+        if (state == State.IDLE) return
         Log.d(TAG, "Stopping recording")
         stopNativeRecording()
+        state = State.IDLE
     }
 
     override fun isActive(): Boolean = state == State.RECORDING

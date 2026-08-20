@@ -80,6 +80,8 @@ static void notifyRecordingStopped() {
 }
 
 static void notifyRecordingError(const std::string &error) {
+    // 统一置位：错误已通知 Java，后续 stopNativeRecording 不再补发 onStopped 覆盖错误提示
+    g_recorder.callback_notified.store(true, std::memory_order_release);
     aaudio_common::notifyErrorToJava(g_recorder.jvm, g_recorder.recorder_instance,
                                      g_recorder.on_recording_error_method, error, "recording error");
 }
@@ -185,7 +187,6 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream *stream,
     if (!g_recorder.wav_file || !g_recorder.wav_file->isOpen()) {
         LOGE("WAV file not available");
         g_recorder.is_recording.store(false, std::memory_order_release);
-        g_recorder.callback_notified.store(true, std::memory_order_release);
         notifyRecordingError("[FILE] WAV file not opened");
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
@@ -195,7 +196,6 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream *stream,
     if (numFrames <= 0 || channel_count <= 0 || channel_count > 16) {
         LOGE("Invalid callback args: numFrames=%d, channelCount=%d", numFrames, channel_count);
         g_recorder.is_recording.store(false, std::memory_order_release);
-        g_recorder.callback_notified.store(true, std::memory_order_release);
         notifyRecordingError("[STREAM] Invalid callback args from stream");
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
@@ -217,8 +217,7 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream *stream,
 static void errorCallback(AAudioStream *stream, void *userData, aaudio_result_t error) {
     LOGE("AAudio error callback: %s", AAudio_convertResultToText(error));
     g_recorder.is_recording.store(false, std::memory_order_release);
-    g_recorder.callback_notified.store(true, std::memory_order_release);
-    // Notify Java so it calls stopNativeRecording to clean up resources
+    // 通知 Java 后由 Fragment.onError 经 stop() 清理资源（关流、join 写线程、回填 WAV 头）
     std::string error_msg = "[STREAM] Recording stream error: ";
     error_msg += AAudio_convertResultToText(error);
     notifyRecordingError(error_msg);
@@ -451,7 +450,6 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv
         g_recorder.wav_file.reset();
         if (!finalized) {
             // 回填头部失败：录音数据未完整落盘，按错误上报而非伪装成正常结束
-            g_recorder.callback_notified.store(true, std::memory_order_release);
             notifyRecordingError("[FILE] Failed to finalize recording file (header write failed)");
         }
     }

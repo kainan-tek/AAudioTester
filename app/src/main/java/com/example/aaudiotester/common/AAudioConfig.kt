@@ -37,20 +37,25 @@ data class AAudioConfig(
             val root = JSONObject(jsonString)
             if (!root.has(section)) return getDefaultConfigs(section)
             val array = root.getJSONArray(section)
-            return (0 until array.length()).map { i ->
-                val c = array.getJSONObject(i)
-                AAudioConfig(
-                    usage = c.optString("usage", "AAUDIO_USAGE_MEDIA"),
-                    contentType = c.optString("contentType", "AAUDIO_CONTENT_TYPE_MUSIC"),
-                    inputPreset = c.optString("inputPreset", "AAUDIO_INPUT_PRESET_GENERIC"),
-                    sampleRate = c.optInt("sampleRate", 48000),
-                    channelCount = c.optInt("channelCount", 1),
-                    format = c.optInt("format", 16),
-                    performanceMode = c.optString("performanceMode", "AAUDIO_PERFORMANCE_MODE_LOW_LATENCY"),
-                    sharingMode = c.optString("sharingMode", "AAUDIO_SHARING_MODE_SHARED"),
-                    audioFilePath = c.optString("audioFilePath", ""),
-                    description = c.optString("description", "Custom Configuration"),
-                )
+            // 单条坏配置只跳过该条，不拖垮整个 section 回退 emergency
+            return (0 until array.length()).mapNotNull { i ->
+                runCatching {
+                    val c = array.getJSONObject(i)
+                    AAudioConfig(
+                        usage = c.optString("usage", "AAUDIO_USAGE_MEDIA"),
+                        contentType = c.optString("contentType", "AAUDIO_CONTENT_TYPE_MUSIC"),
+                        inputPreset = c.optString("inputPreset", "AAUDIO_INPUT_PRESET_GENERIC"),
+                        sampleRate = c.optInt("sampleRate", 48000),
+                        channelCount = c.optInt("channelCount", 1),
+                        format = c.optInt("format", 16),
+                        performanceMode = c.optString("performanceMode", "AAUDIO_PERFORMANCE_MODE_LOW_LATENCY"),
+                        sharingMode = c.optString("sharingMode", "AAUDIO_SHARING_MODE_SHARED"),
+                        audioFilePath = c.optString("audioFilePath", ""),
+                        description = c.optString("description", "Custom Configuration"),
+                    )
+                }.onFailure {
+                    Log.e(TAG, "Skipping invalid $section config entry #$i", it)
+                }.getOrNull()
             }
         }
 

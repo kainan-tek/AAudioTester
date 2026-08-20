@@ -59,4 +59,13 @@ class AAudioConfigTest {
         )
         assertEquals("", configs[0].audioFilePath)
     }
+
+    @Test
+    fun parseConfigs_badEntry_skipsOnlyThatEntry() {
+        val json = """{ "player": [ "not-an-object",
+                           { "usage": "AAUDIO_USAGE_GAME", "description": "ok" } ] }"""
+        val configs = AAudioConfig.parseConfigs(json, "player")
+        assertEquals(1, configs.size)
+        assertEquals("AAUDIO_USAGE_GAME", configs[0].usage)
+    }
 }

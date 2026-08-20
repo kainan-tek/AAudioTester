@@ -140,6 +140,8 @@ static void notifyPlaybackStopped() {
 }
 
 static void notifyPlaybackError(const std::string& error) {
+    // 统一置位：错误已通知 Java，后续 stopNativePlayback 不再补发 onStopped 覆盖错误提示
+    g_player.callback_notified.store(true, std::memory_order_release);
     aaudio_common::notifyErrorToJava(g_player.jvm, g_player.player_instance, g_player.on_playback_error_method,
                                      error, "playback error");
 }
@@ -161,7 +163,6 @@ static void playReadThread() {
             if (g_player.wav_file->hasReadError()) {
                 // I/O 错误或文件截断：按错误上报，而非伪装成正常 EOF
                 g_player.is_playing.store(false, std::memory_order_release);
-                g_player.callback_notified.store(true, std::memory_order_release);
                 notifyPlaybackError("[FILE] Audio read failed or file truncated");
                 return;
             }
@@ -186,7 +187,6 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
 
     if (!g_player.wav_file || !g_player.wav_file->isOpen()) {
         g_player.is_playing.store(false, std::memory_order_release);
-        g_player.callback_notified.store(true, std::memory_order_release);
         notifyPlaybackError("[FILE] Audio file not opened");
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
@@ -196,7 +196,6 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
     if (numFrames <= 0 || channel_count <= 0 || channel_count > 16) {
         LOGE("Invalid callback args: numFrames=%d, channelCount=%d", numFrames, channel_count);
         g_player.is_playing.store(false, std::memory_order_release);
-        g_player.callback_notified.store(true, std::memory_order_release);
         notifyPlaybackError("[STREAM] Invalid callback args from stream");
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
@@ -252,8 +251,7 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
 static void errorCallback(AAudioStream* stream, void* userData, aaudio_result_t error) {
     LOGE("AAudio error: %s", AAudio_convertResultToText(error));
     g_player.is_playing.store(false, std::memory_order_release);
-    g_player.callback_notified.store(true, std::memory_order_release);
-    // Notify Java so it calls stopNativePlayback to clean up resources
+    // 通知 Java 后由 Fragment.onError 经 stop() 清理资源（关流、join 读线程）
     std::string error_msg = "[STREAM] Playback stream error: ";
     error_msg += AAudio_convertResultToText(error);
     notifyPlaybackError(error_msg);
@@ -329,8 +327,7 @@ static bool createAAudioStream() {
 extern "C" {
 
 JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_initializeNative(JNIEnv* env,
-                                                                                              jobject thiz,
-                                                                                              jstring filePath) {
+                                                                                              jobject thiz) {
     LOGI("initializeNative");
 
     if (!validatePlayerState()) {
@@ -372,22 +369,6 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_ini
             g_player.player_instance = nullptr;
         }
         return JNI_FALSE;
-    }
-
-    if (filePath) {
-        const char* path = env->GetStringUTFChars(filePath, nullptr);
-        if (path) {
-            g_player.audio_file_path = std::string(path);
-            env->ReleaseStringUTFChars(filePath, path);
-        } else {
-            LOGE("Failed to get file path string");
-            // 与本函数上方失败路径一致：清掉 GlobalRef，避免泄漏
-            if (g_player.player_instance) {
-                env->DeleteGlobalRef(g_player.player_instance);
-                g_player.player_instance = nullptr;
-            }
-            return JNI_FALSE;
-        }
     }
 
     return JNI_TRUE;

@@ -39,7 +39,6 @@ class PlayerFragment : AAudioTestFragment() {
         raw.startsWith("[FOCUS]", ignoreCase = true) ->
             "Unable to play audio. Another app may be using the audio system."
         raw.contains("Already playing", ignoreCase = true) -> "Playback is already in progress."
-        raw.contains("Not currently playing", ignoreCase = true) -> "No playback is in progress."
         else -> "Playback failed. Please try again."
     }
 }

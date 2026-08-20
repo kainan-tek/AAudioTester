@@ -46,7 +46,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
     }
 
     init {
-        initializeNative(resolveCurrentPath())
+        initializeNative()
     }
 
     private fun resolveCurrentPath(): String {
@@ -106,9 +106,11 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
     }
 
     override fun stop() {
-        if (state != State.PLAYING) return
+        // ERROR 态也进入：清理错误残留的流/文件/读线程（由 Fragment.onError 触发）
+        if (state == State.IDLE) return
         Log.d(TAG, "Stopping playback")
         stopNativePlayback()
+        state = State.IDLE
     }
 
     override fun isActive(): Boolean = state == State.PLAYING
@@ -162,7 +164,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
     }
 
     // Native methods
-    private external fun initializeNative(filePath: String): Boolean
+    private external fun initializeNative(): Boolean
     private external fun setNativeConfig(
         usage: Int, contentType: Int, performanceMode: Int, sharingMode: Int, filePath: String
     ): Boolean
