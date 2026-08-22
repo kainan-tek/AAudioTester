@@ -1,8 +1,8 @@
-# AAudioPlayer 延迟测试功能
+# AAudioTester 延迟测试功能
 
 ## 功能说明
 
-AAudioPlayer 集成了音频延迟测试功能，通过 GPIO 电平翻转和音频数据变化的同步来测量音频链路延迟。
+AAudioTester 播放引擎（`app/src/main/cpp/aaudio_player.cpp`）集成了音频延迟测试功能，通过 GPIO 电平翻转和音频数据变化的同步来测量音频链路延迟。默认编译期禁用，不影响常规使用。
 
 ## 工作原理
 

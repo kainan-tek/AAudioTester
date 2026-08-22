@@ -8,8 +8,8 @@ import android.media.AudioAttributes
 object AAudioConstants {
 
     // 配置文件
-    const val CONFIG_FILE_PATH = "/data/aaudio_configs.json"
-    const val ASSETS_CONFIG_FILE = "aaudio_configs.json"
+    const val CONFIG_FILE_PATH = "/data/aaudio_configs.xml"
+    const val ASSETS_CONFIG_FILE = "aaudio_configs.xml"
 
     // 内置音源
     const val DEFAULT_ASSET = "asset://sample/48k_2ch_16bit.wav"
