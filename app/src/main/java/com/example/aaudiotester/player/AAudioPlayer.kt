@@ -33,6 +33,9 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
     @Volatile
     private var state = State.IDLE
 
+    @Volatile
+    private var errored = false  // 本会话已上报错误：迟到的 started 一律忽略（错误优先、终态）
+
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS,
@@ -85,6 +88,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
             return false
         }
         if (state == State.ERROR) state = State.IDLE
+        errored = false  // 新会话复位
 
         val audioPath = resolveCurrentPath()
         if (audioPath.isBlank() || !audioPath.lowercase().endsWith(".wav")) {
@@ -175,6 +179,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
     // 原生层回调
     @Suppress("unused")
     private fun onNativePlaybackStarted() {
+        if (errored) return  // 错误优先：native 已停止，忽略竞态中迟到的 started
         state = State.PLAYING
         listener?.onStarted()
         Log.i(TAG, "Playback started successfully")
@@ -190,6 +195,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
 
     @Suppress("unused")
     private fun onNativePlaybackError(error: String) {
+        errored = true  // 会话内错误终态
         state = State.ERROR
         abandonAudioFocus()
         listener?.onError(error)

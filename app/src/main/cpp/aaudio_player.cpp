@@ -156,7 +156,12 @@ static void stopReadThread() {
 
 // 播放读线程：持续把 WAV 数据读入环形缓冲，回调线程只 memcpy、永不碰磁盘。
 static void playReadThread() {
-    std::vector<char> buf(64 * 1024);
+    // 24-bit 帧大小(6/12...)不整除 64KB：缓冲取整到帧倍数，保证环形缓冲内容始终帧对齐
+    const size_t frame_size =
+        WavFile::getBytesPerSample(g_player.wav_file->getAAudioFormat()) *
+        static_cast<size_t>(g_player.wav_file->getChannelCount());
+    const size_t buf_size = (64 * 1024) / frame_size * frame_size;
+    std::vector<char> buf(buf_size);
     while (!g_player.stop_read_thread.load(std::memory_order_acquire)) {
         const size_t n = g_player.wav_file->readAudioData(buf.data(), buf.size());
         if (n == 0) {
@@ -216,8 +221,10 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
         // 缓冲空：数据已播尽(EOF) 或 读线程尚未填上(underrun，本次输出静音)。
         if (g_player.eof_reached.load(std::memory_order_acquire)) {
             g_player.is_playing.store(false, std::memory_order_release);
-            g_player.callback_notified.store(true, std::memory_order_release);
-            notifyPlaybackStopped();
+            // exchange 抢占一次通知权：与 stopNativePlayback 竞争时仅一个赢家，避免双通知
+            if (!g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+                notifyPlaybackStopped();
+            }
             return AAUDIO_CALLBACK_RESULT_STOP;
         }
         g_player.underrun_count.fetch_add(1, std::memory_order_relaxed);
@@ -307,6 +314,17 @@ static bool createAAudioStream() {
 
     LOGI("Stream created: %dHz, %dch, format=%d, mode=%d", actual_rate, actual_channels,
          actual_format, AAudioStream_getPerformanceMode(g_player.stream.get()));
+
+    // AAudio 无 getMinBufferSize：minBurst=AAudioStream_getFramesPerBurst 为最小缓冲单位，
+    // bufferSize=实际缓冲（optimizeBufferSize 已设 2×/4× burst），capacity=上限。
+    int32_t frames_per_burst = AAudioStream_getFramesPerBurst(g_player.stream.get());
+    int32_t buffer_size_frames = AAudioStream_getBufferSizeInFrames(g_player.stream.get());
+    int32_t capacity_frames = AAudioStream_getBufferCapacityInFrames(g_player.stream.get());
+    const int32_t frame_bytes = aaudio_common::bytesPerSample(actual_format) * actual_channels;
+    LOGI("AAudio buffer info: minBurst=%d frames (%d B, %.1fms) | bufferSize=%d frames (%d B, %.1fms) | capacity=%d frames (%.1fms)",
+         frames_per_burst, frames_per_burst * frame_bytes, frames_per_burst * 1000.0 / actual_rate,
+         buffer_size_frames, buffer_size_frames * frame_bytes, buffer_size_frames * 1000.0 / actual_rate,
+         capacity_frames, capacity_frames * 1000.0 / actual_rate);
 
     // 流实际声道/格式与 WAV 不一致时按错误处理：回调按流格式消费字节，而 ring 中是
     // 文件格式布局，不一致会导致变调/噪声且无提示（recorder 侧通过 actual 回写规避）。
@@ -494,9 +512,8 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
     closeGpio();
 #endif
 
-    // Only notify stopped if callback hasn't already notified Java (error or EOF)
-    bool already_notified = g_player.callback_notified.exchange(false, std::memory_order_acq_rel);
-    if (!already_notified) {
+    // 一次性 latch：首个 claimer 才通知 stopped（error/EOF 已置位则跳过），避免双通知
+    if (!g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
         notifyPlaybackStopped();
     }
     return JNI_TRUE;

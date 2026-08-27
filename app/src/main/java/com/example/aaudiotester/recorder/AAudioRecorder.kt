@@ -26,6 +26,9 @@ class AAudioRecorder(context: Context) : AAudioEngine {
     @Volatile
     private var state = State.IDLE
 
+    @Volatile
+    private var errored = false  // 本会话已上报错误：迟到的 started 一律忽略（错误优先、终态）
+
     init {
         initializeNative()
     }
@@ -60,6 +63,7 @@ class AAudioRecorder(context: Context) : AAudioEngine {
             return false
         }
         if (state == State.ERROR) state = State.IDLE
+        errored = false  // 新会话复位
 
         if (!AAudioConstants.isValidSampleRate(currentConfig.sampleRate)) {
             val error = "${AAudioConstants.ErrorTypes.PARAM} Invalid sample rate: ${currentConfig.sampleRate}"
@@ -122,6 +126,7 @@ class AAudioRecorder(context: Context) : AAudioEngine {
     // 原生层回调
     @Suppress("unused")
     private fun onNativeRecordingStarted() {
+        if (errored) return  // 错误优先：native 已停止，忽略竞态中迟到的 started
         state = State.RECORDING
         listener?.onStarted()
         Log.i(TAG, "Recording started successfully")
@@ -136,6 +141,7 @@ class AAudioRecorder(context: Context) : AAudioEngine {
 
     @Suppress("unused")
     private fun onNativeRecordingError(error: String) {
+        errored = true  // 会话内错误终态
         state = State.ERROR
         listener?.onError(error)
         Log.e(TAG, "Recording error: $error")

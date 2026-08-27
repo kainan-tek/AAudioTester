@@ -150,6 +150,9 @@ int32_t WavFile::getChannelCount() const {
 }
 
 aaudio_format_t WavFile::getAAudioFormat() const {
+    if (header_.audio_format == 3) {
+        return AAUDIO_FORMAT_PCM_FLOAT;  // IEEE float WAV → float 流
+    }
     switch (header_.bits_per_sample) {
         case 16:
             return AAUDIO_FORMAT_PCM_I16;
@@ -166,19 +169,20 @@ std::string WavFile::getFormatInfo() const {
     std::ostringstream oss;
     oss << static_cast<int32_t>(header_.sample_rate) << "Hz, "
         << static_cast<int32_t>(header_.num_channels) << " channels, "
-        << static_cast<int32_t>(header_.bits_per_sample) << " bits, PCM";
+        << static_cast<int32_t>(header_.bits_per_sample) << " bits, "
+        << (header_.audio_format == 3 ? "FLOAT" : "PCM");
     return oss.str();
 }
 
 bool WavFile::isValidFormat() const {
-    // Only PCM (format 1) is accepted here, so a float WAV (format 3, written by writeHeader for
-    // PCM_FLOAT) could not be read back. In practice float is unreachable: the Kotlin layer maps
-    // 16/24/32-bit to I16/I24_PACKED/I32 only.
-    return (header_.audio_format == 1 && header_.num_channels > 0 && header_.num_channels <= 16 &&
-            header_.sample_rate > 0 && header_.sample_rate <= 192000 &&
-            (header_.bits_per_sample == 16 || header_.bits_per_sample == 24 ||
-             header_.bits_per_sample == 32) &&
-            header_.subchunk2_size > 0);
+    // PCM (format 1) 或 IEEE float (format 3, 32-bit，录音器在设备替换格式时可能写出)。
+    const bool pcm = header_.audio_format == 1;
+    const bool float32 = header_.audio_format == 3 && header_.bits_per_sample == 32;
+    return (pcm || float32) && header_.num_channels > 0 && header_.num_channels <= 16 &&
+           header_.sample_rate > 0 && header_.sample_rate <= 192000 &&
+           (header_.bits_per_sample == 16 || header_.bits_per_sample == 24 ||
+            header_.bits_per_sample == 32) &&
+           header_.subchunk2_size > 0;
 }
 
 int32_t WavFile::getBytesPerSample(aaudio_format_t format) {
