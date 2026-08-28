@@ -49,7 +49,7 @@ private:
         uint32_t chunk_size;         // 36 + data_size
         char format[4];              // "WAVE"
         char subchunk1_id[4];        // "fmt "
-        uint32_t subchunk1_size;     // 16 for PCM
+        [[maybe_unused]] uint32_t subchunk1_size;     // 16 for PCM
         uint16_t audio_format;       // 1 PCM, 3 float
         uint16_t num_channels;
         uint32_t sample_rate;

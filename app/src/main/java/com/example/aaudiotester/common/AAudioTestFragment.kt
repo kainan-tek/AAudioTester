@@ -1,5 +1,6 @@
 package com.example.aaudiotester.common
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -191,10 +192,12 @@ abstract class AAudioTestFragment : Fragment() {
         configSpinner.isEnabled = !active
     }
 
+    @SuppressLint("SetTextI18n")
     private fun updateInfo() {
         currentConfig?.let { infoText.text = formatInfo(it) } ?: run { infoText.text = "Information" }
     }
 
+    @SuppressLint("SetTextI18n")
     private fun showError(raw: String) {
         val userMessage = friendlyErrorMessage(raw)
         AlertDialog.Builder(requireContext())

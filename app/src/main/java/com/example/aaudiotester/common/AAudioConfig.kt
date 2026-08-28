@@ -37,7 +37,7 @@ data class AAudioConfig(
         /** 内部 seam，便于 JVM 单测。section 缺失 → 兜底默认；空 section → 空列表 */
         internal fun parseConfigs(xml: InputStream, section: String): List<AAudioConfig> {
             val sectionElement = DocumentBuilderFactory.newInstance().newDocumentBuilder()
-                .parse(xml).documentElement.getElementsByTagName(section).item(0) as Element?
+                .parse(xml).documentElement.getElementsByTagName(section).item(0) as? Element?
                 ?: return getDefaultConfigs(section)
             val entries = sectionElement.getElementsByTagName("config")
             // 单条坏配置只跳过该条，不拖垮整个 section 回退 emergency

@@ -61,7 +61,7 @@ size_t WavFile::readAudioData(void* buffer, size_t bufferSize) {
     size_t actual_read_size = std::min(bufferSize, kMaxStreamSize);
     auto read_size = static_cast<std::streamsize>(actual_read_size);
     in_.read(static_cast<char*>(buffer), read_size);
-    const size_t n = static_cast<size_t>(in_.gcount());
+    const auto n = static_cast<size_t>(in_.gcount());
     if (n == 0 && remaining_data_ > 0) {
         // 声明的 data 区未读完即止：I/O 失败或文件被截断（区别于正常读尽）
         read_error_ = true;
