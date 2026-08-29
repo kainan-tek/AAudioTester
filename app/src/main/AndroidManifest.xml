@@ -8,9 +8,6 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
-    <uses-permission
-        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
 
     <!-- 系统级签名权限：普通安装不会被授予（无副作用）；仅 priv-app 系统部署 + 权限白名单时生效。
          MODIFY_AUDIO_ROUTING → AAOS 系统 usage（EMERGENCY/SAFETY/VEHICLE_STATUS/ANNOUNCEMENT）

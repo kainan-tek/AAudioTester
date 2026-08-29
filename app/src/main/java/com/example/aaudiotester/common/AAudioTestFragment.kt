@@ -2,8 +2,10 @@ package com.example.aaudiotester.common
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.provider.Settings
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -16,6 +18,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.fragment.app.Fragment
 import com.example.aaudiotester.R
 import java.util.concurrent.Executor
@@ -47,15 +50,32 @@ abstract class AAudioTestFragment : Fragment() {
     private var availableConfigs: List<AAudioConfig> = emptyList()
     private var currentConfig: AAudioConfig? = null
 
+    // 权限"永久拒绝"判定需先申请过至少一次：首次拒绝时 rationale 尚不可展示，不能误导向设置页
+    private var permissionRequestedOnce = false
+
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             val denied = result.filterValues { !it }.keys
             if (denied.isEmpty()) {
                 startInternal()
-            } else {
-                statusText.text = messages.failed
-                Toast.makeText(requireContext(), "Permission denied: ${denied.joinToString()}", Toast.LENGTH_SHORT).show()
+                return@registerForActivityResult
             }
+            // AAOS 车机上 Toast 不可见，故用对话框反馈；永久拒绝时引导到系统设置页
+            val permanent = permissionRequestedOnce &&
+                denied.any { !shouldShowRequestPermissionRationale(it) }
+            permissionRequestedOnce = true
+            val builder = AlertDialog.Builder(requireContext())
+                .setTitle("Permission Required")
+                .setMessage(
+                    if (permanent) "Permission permanently denied. Please grant it in system settings."
+                    else "Permission needed to continue."
+                )
+                .setPositiveButton("OK") { dialog, _ -> dialog.dismiss() }
+            if (permanent) {
+                builder.setNegativeButton("Open Settings") { _, _ -> openAppSettings() }
+            }
+            builder.show()
+            statusText.text = messages.failed
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -210,6 +230,13 @@ abstract class AAudioTestFragment : Fragment() {
 
     private fun toast(msg: String) {
         Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show()
+    }
+
+    /** 打开本应用的系统设置页（权限被永久拒绝时的引导） */
+    private fun openAppSettings() {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            .setData("package:${requireContext().packageName}".toUri())
+        startActivity(intent)
     }
 
     override fun onPause() {
