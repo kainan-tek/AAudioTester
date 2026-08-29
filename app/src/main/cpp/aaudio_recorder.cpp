@@ -38,6 +38,8 @@ struct AudioRecorderState {
     std::thread write_thread;
     std::atomic<bool> stop_write_thread{false};
     std::atomic<size_t> dropped_bytes{0};
+    // RT 回调置位的终止错误（静态串，无分配）：由写线程在非 RT 线程投递，回调线程不碰 JNI
+    std::atomic<const char*> rt_error_msg{nullptr};
 
     JavaVM *jvm = nullptr;
     jobject recorder_instance = nullptr;
@@ -111,6 +113,13 @@ static void recordWriteThread() {
         }
     };
     while (!g_recorder.stop_write_thread.load(std::memory_order_acquire)) {
+        // RT 回调置的终止错误：在此投递，避免回调线程做 JNI
+        if (const char* msg = g_recorder.rt_error_msg.load(std::memory_order_acquire)) {
+            g_recorder.rt_error_msg.store(nullptr, std::memory_order_release);
+            g_recorder.is_recording.store(false, std::memory_order_release);
+            notifyRecordingError(msg);
+            return;
+        }
         const size_t n = g_recorder.ring->read(buf.data(), buf.size());
         if (n == 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -122,6 +131,12 @@ static void recordWriteThread() {
     size_t n;
     while ((n = g_recorder.ring->read(buf.data(), buf.size())) > 0) {
         writeOut(buf.data(), n);
+    }
+    // 排空后投递 RT 回调在 stop 竞态窗口内可能已置的错误
+    if (const char* msg = g_recorder.rt_error_msg.load(std::memory_order_acquire)) {
+        g_recorder.rt_error_msg.store(nullptr, std::memory_order_release);
+        g_recorder.is_recording.store(false, std::memory_order_release);
+        notifyRecordingError(msg);
     }
     if (save_failed) {
         LOGW("Recording finished: %zu bytes not saved (file write failed)", dropped_bytes);
@@ -145,25 +160,8 @@ static std::string generateTimestampedFilePath() {
     oss << "_" << (g_recorder.sample_rate / 1000) << "k";
     oss << "_" << g_recorder.channel_count << "ch";
 
-    int bits_per_sample = 16;
-    switch (g_recorder.format) {
-        case AAUDIO_FORMAT_PCM_I16:
-            bits_per_sample = 16;
-            break;
-        case AAUDIO_FORMAT_PCM_FLOAT:
-            bits_per_sample = 32;
-            break;
-        case AAUDIO_FORMAT_PCM_I24_PACKED:
-            bits_per_sample = 24;
-            break;
-        case AAUDIO_FORMAT_PCM_I32:
-            bits_per_sample = 32;
-            break;
-        default:
-            bits_per_sample = 16;
-            break;
-    }
-    oss << "_" << bits_per_sample << "bit";
+    // 位深 = 每样本字节数 × 8（与 wav_file 头部推导同源，格式→位深映射唯一）
+    oss << "_" << (aaudio_common::bytesPerSample(g_recorder.format) * 8) << "bit";
     oss << ".wav";
 
     return oss.str();
@@ -185,18 +183,19 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream *stream,
     }
 
     if (!g_recorder.wav_file || !g_recorder.wav_file->isOpen()) {
+        // 只置位，JNI 通知由写线程在非 RT 线程投递（回调线程禁止 JNI）
         LOGE("WAV file not available");
+        g_recorder.rt_error_msg.store("[FILE] WAV file not opened", std::memory_order_release);
         g_recorder.is_recording.store(false, std::memory_order_release);
-        notifyRecordingError("[FILE] WAV file not opened");
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
 
-    // 回调参数守卫：清状态并通知，与上方文件异常分支模式一致（原裸 return 会致 UI 卡“进行中”）
+    // 回调参数守卫：清状态并置位，与上方文件异常分支模式一致（原裸 return 会致 UI 卡“进行中”）
     int32_t channel_count = AAudioStream_getChannelCount(stream);
     if (numFrames <= 0 || channel_count <= 0 || channel_count > 16) {
         LOGE("Invalid callback args: numFrames=%d, channelCount=%d", numFrames, channel_count);
+        g_recorder.rt_error_msg.store("[STREAM] Invalid callback args from stream", std::memory_order_release);
         g_recorder.is_recording.store(false, std::memory_order_release);
-        notifyRecordingError("[STREAM] Invalid callback args from stream");
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
 
@@ -286,23 +285,9 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_initializeNative(JNIEnv *e
         return JNI_FALSE;
     }
 
-    if (g_recorder.recorder_instance != nullptr) {
-        env->DeleteGlobalRef(g_recorder.recorder_instance);
-        g_recorder.recorder_instance = nullptr;
-    }
-    g_recorder.recorder_instance = env->NewGlobalRef(thiz);
-    if (!g_recorder.recorder_instance) {
-        LOGE("Failed to create global reference");
-        return JNI_FALSE;
-    }
-
-    jclass clazz = env->GetObjectClass(thiz);
-    if (clazz == nullptr) {
-        LOGE("Failed to get object class");
-        if (g_recorder.recorder_instance) {
-            env->DeleteGlobalRef(g_recorder.recorder_instance);
-            g_recorder.recorder_instance = nullptr;
-        }
+    jclass clazz =
+        aaudio_common::bindJavaInstance(env, thiz, g_recorder.recorder_instance, "recorder");
+    if (!clazz) {
         return JNI_FALSE;
     }
 
@@ -480,7 +465,11 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_releaseNative(JNIEnv *env,
         Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(env, thiz);
     }
 
-    if (g_recorder.recorder_instance) {
+    // 所有权守卫 + 互斥：仅删除当前仍指向本实例的全局引用——旋转/重建时旧实例延迟排队的
+    // release（旧 executor 线程）与 initializeNative（主线程）经 jniBindMutex 互斥，杜绝二次释放
+    std::lock_guard<std::mutex> lock(aaudio_common::jniBindMutex());
+    if (g_recorder.recorder_instance &&
+        env->IsSameObject(thiz, g_recorder.recorder_instance)) {
         env->DeleteGlobalRef(g_recorder.recorder_instance);
         g_recorder.recorder_instance = nullptr;
     }

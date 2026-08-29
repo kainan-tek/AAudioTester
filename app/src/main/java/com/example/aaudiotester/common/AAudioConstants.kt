@@ -115,7 +115,7 @@ object AAudioConstants {
     }
 
     private fun parseEnumValue(
-        map: Map<String, Int>, value: String, default: Int, typeName: String = ""
+        map: Map<String, Int>, value: String, default: Int, typeName: String
     ): Int = map[value] ?: run {
         if (value.isNotEmpty()) {
             android.util.Log.w("AAudioConstants", "Unknown $typeName value: $value, using default: $default")
@@ -141,16 +141,19 @@ object AAudioConstants {
         SharingMode.MAP, sharingMode, AAudio.SHARING_MODE_SHARED, "SharingMode"
     )
 
-    fun getFormatFromBitDepth(bitDepth: Int): Int = when (bitDepth) {
-        16 -> AAudio.FORMAT_PCM_I16
-        24 -> AAudio.FORMAT_PCM_I24_PACKED
-        32 -> AAudio.FORMAT_PCM_I32
-        else -> AAudio.FORMAT_PCM_I16
-    }
+    /** 位深 → native AAudio 格式；合法位深集合同源（isValidFormat 派生自它） */
+    private val FORMAT_BY_BIT_DEPTH = mapOf(
+        FORMAT_16_BIT to AAudio.FORMAT_PCM_I16,
+        FORMAT_24_BIT to AAudio.FORMAT_PCM_I24_PACKED,
+        FORMAT_32_BIT to AAudio.FORMAT_PCM_I32,
+    )
+
+    fun getFormatFromBitDepth(bitDepth: Int): Int =
+        FORMAT_BY_BIT_DEPTH[bitDepth] ?: AAudio.FORMAT_PCM_I16
 
     fun isValidSampleRate(sampleRate: Int): Boolean = sampleRate in MIN_SAMPLE_RATE..MAX_SAMPLE_RATE
 
     fun isValidChannelCount(channelCount: Int): Boolean = channelCount in MIN_CHANNEL_COUNT..MAX_CHANNEL_COUNT
 
-    fun isValidFormat(bitDepth: Int): Boolean = bitDepth in listOf(FORMAT_16_BIT, FORMAT_24_BIT, FORMAT_32_BIT)
+    fun isValidFormat(bitDepth: Int): Boolean = bitDepth in FORMAT_BY_BIT_DEPTH
 }

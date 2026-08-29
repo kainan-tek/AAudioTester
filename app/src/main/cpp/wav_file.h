@@ -35,7 +35,6 @@ public:
     bool openWrite(const std::string& filePath, int32_t sampleRate,
                    int32_t channelCount, aaudio_format_t format);
     bool writeData(const void* data, size_t size);
-    static int32_t getBytesPerSample(aaudio_format_t format);
 
     // 公共
     bool isOpen() const;

@@ -49,6 +49,8 @@ struct AudioPlayerState {
     std::atomic<bool> eof_reached{false};
     std::atomic<bool> stop_read_thread{false};
     std::atomic<size_t> underrun_count{0};
+    // RT 回调置位的终止错误（静态串，无分配）：由读线程在非 RT 线程投递，回调线程不碰 JNI
+    std::atomic<const char*> rt_error_msg{nullptr};
 
     JavaVM* jvm = nullptr;
     jobject player_instance = nullptr;
@@ -63,9 +65,7 @@ struct AudioPlayerState {
     std::string audio_file_path = "/data/48k_2ch_16bit.wav";
 
 #if LATENCY_TEST_ENABLE
-    std::atomic<int> write_counter{0};
-    std::atomic<bool> gpio_state{false};
-    std::atomic<bool> mute_audio{false};
+    std::atomic<int> write_counter{0};   // 唯一事实源：块号推导静音与 GPIO 电平
     std::atomic<bool> latency_test_enabled{false};
     int gpio_fd = -1;
 #endif
@@ -119,14 +119,6 @@ static inline bool writeGpioValue(int value) {
     return true;
 }
 
-static inline void toggleGpio() {
-    bool current_state = g_player.gpio_state.load(std::memory_order_relaxed);
-    bool new_state = !current_state;
-
-    if (writeGpioValue(new_state ? 1 : 0)) {
-        g_player.gpio_state.store(new_state, std::memory_order_relaxed);
-    }
-}
 #endif
 
 static void notifyPlaybackStarted() {
@@ -155,14 +147,22 @@ static void stopReadThread() {
 }
 
 // 播放读线程：持续把 WAV 数据读入环形缓冲，回调线程只 memcpy、永不碰磁盘。
+// 兼作终止通知线程：EOF/RT 错误的 JNI 通知在此（非 RT 线程）投递，回调线程只置位。
 static void playReadThread() {
     // 24-bit 帧大小(6/12...)不整除 64KB：缓冲取整到帧倍数，保证环形缓冲内容始终帧对齐
     const size_t frame_size =
-        WavFile::getBytesPerSample(g_player.wav_file->getAAudioFormat()) *
+        aaudio_common::bytesPerSample(g_player.wav_file->getAAudioFormat()) *
         static_cast<size_t>(g_player.wav_file->getChannelCount());
     const size_t buf_size = (64 * 1024) / frame_size * frame_size;
     std::vector<char> buf(buf_size);
     while (!g_player.stop_read_thread.load(std::memory_order_acquire)) {
+        // RT 回调置的终止错误：在此投递，避免回调线程做 JNI
+        if (const char* msg = g_player.rt_error_msg.load(std::memory_order_acquire)) {
+            g_player.rt_error_msg.store(nullptr, std::memory_order_release);
+            g_player.is_playing.store(false, std::memory_order_release);
+            notifyPlaybackError(msg);
+            return;
+        }
         const size_t n = g_player.wav_file->readAudioData(buf.data(), buf.size());
         if (n == 0) {
             if (g_player.wav_file->hasReadError()) {
@@ -172,13 +172,33 @@ static void playReadThread() {
                 return;
             }
             g_player.eof_reached.store(true, std::memory_order_release);  // 文件读尽
+            // 等回调排空 ring 后再通知 stopped（RT 回调只 return STOP，不碰 JNI）
+            while (!g_player.stop_read_thread.load(std::memory_order_acquire) &&
+                   g_player.ring->readable() > 0 &&
+                   g_player.rt_error_msg.load(std::memory_order_acquire) == nullptr) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            g_player.is_playing.store(false, std::memory_order_release);
+            if (const char* msg = g_player.rt_error_msg.load(std::memory_order_acquire)) {
+                g_player.rt_error_msg.store(nullptr, std::memory_order_release);
+                notifyPlaybackError(msg);
+            } else if (!g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+                notifyPlaybackStopped();
+            }
             return;
         }
         size_t off = 0;
         while (off < n && !g_player.stop_read_thread.load(std::memory_order_acquire)) {
+            if (g_player.rt_error_msg.load(std::memory_order_acquire)) break;  // 提前让位错误投递
             off += g_player.ring->write(buf.data() + off, n - off);
             if (off < n) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+    }
+    // 退出前投递 RT 回调在 stop 竞态窗口内可能已置的错误
+    if (const char* msg = g_player.rt_error_msg.load(std::memory_order_acquire)) {
+        g_player.rt_error_msg.store(nullptr, std::memory_order_release);
+        g_player.is_playing.store(false, std::memory_order_release);
+        notifyPlaybackError(msg);
     }
 }
 
@@ -191,17 +211,18 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
     }
 
     if (!g_player.wav_file || !g_player.wav_file->isOpen()) {
+        // 只置位，JNI 通知由读线程在非 RT 线程投递（回调线程禁止 JNI）
+        g_player.rt_error_msg.store("[FILE] Audio file not opened", std::memory_order_release);
         g_player.is_playing.store(false, std::memory_order_release);
-        notifyPlaybackError("[FILE] Audio file not opened");
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
 
-    // 回调参数守卫：清状态并通知，与上方文件异常分支模式一致（原裸 return 会致 UI 卡“进行中”）
+    // 回调参数守卫：清状态并置位，与上方文件异常分支模式一致（原裸 return 会致 UI 卡“进行中”）
     int32_t channel_count = AAudioStream_getChannelCount(stream);
     if (numFrames <= 0 || channel_count <= 0 || channel_count > 16) {
         LOGE("Invalid callback args: numFrames=%d, channelCount=%d", numFrames, channel_count);
+        g_player.rt_error_msg.store("[STREAM] Invalid callback args from stream", std::memory_order_release);
         g_player.is_playing.store(false, std::memory_order_release);
-        notifyPlaybackError("[STREAM] Invalid callback args from stream");
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
 
@@ -211,20 +232,18 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
     // Calculate bytes to read
     int32_t bytes_to_read = numFrames * channel_count * bytes_per_sample;
 
-    // 先清零：underrun 或尾部不足时自动补静音，避免残留旧数据。
-    memset(audioData, 0, static_cast<size_t>(bytes_to_read));
-
     const size_t bytes_read =
         g_player.ring->read(static_cast<char*>(audioData), static_cast<size_t>(bytes_to_read));
+
+    // 只补尾部静音：underrun 或尾部不足时补零避免残留旧数据（满数据时零开销）
+    if (bytes_read < static_cast<size_t>(bytes_to_read)) {
+        memset(static_cast<char*>(audioData) + bytes_read, 0, bytes_to_read - bytes_read);
+    }
 
     if (bytes_read == 0) {
         // 缓冲空：数据已播尽(EOF) 或 读线程尚未填上(underrun，本次输出静音)。
         if (g_player.eof_reached.load(std::memory_order_acquire)) {
-            g_player.is_playing.store(false, std::memory_order_release);
-            // exchange 抢占一次通知权：与 stopNativePlayback 竞争时仅一个赢家，避免双通知
-            if (!g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
-                notifyPlaybackStopped();
-            }
+            // 终止通知（stopped/错误）由读线程在非 RT 线程投递，此处只 return STOP
             return AAUDIO_CALLBACK_RESULT_STOP;
         }
         g_player.underrun_count.fetch_add(1, std::memory_order_relaxed);
@@ -232,21 +251,21 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
 
 #if LATENCY_TEST_ENABLE
     if (g_player.latency_test_enabled.load(std::memory_order_relaxed)) {
-        int current_count = g_player.write_counter.fetch_add(1);
-
-        if (current_count % LATENCY_TEST_INTERVAL == 0) {
-            toggleGpio();
-
-            bool current_mute_state = g_player.mute_audio.load(std::memory_order_relaxed);
-            g_player.mute_audio.store(!current_mute_state, std::memory_order_relaxed);
-
-            if (current_count % (LATENCY_TEST_INTERVAL * 1000) == 0) {
-                LOGD("Latency test: count=%d, gpio=%d, mute=%d", current_count,
-                     g_player.gpio_state.load(std::memory_order_relaxed) ? 1 : 0, !current_mute_state ? 1 : 0);
+        // 单一事实源：块号推导 GPIO 与静音，无独立状态可失步
+        const int count = g_player.write_counter.fetch_add(1);   // 0-based
+        const int block = count / LATENCY_TEST_INTERVAL;
+        const bool muted = (block & 1) == 0;                     // 偶数块静音
+        if (count % LATENCY_TEST_INTERVAL == 0) {                // 块起点（count=0 即首个）
+            const int gpio = (block + 1) & 1;                    // +1 对齐 init 的低电平：block0 写 1 出首条边沿
+            if (!writeGpioValue(gpio)) {
+                // GPIO 失败：参考丢失，禁用测试，避免音频继续空切静音
+                g_player.latency_test_enabled.store(false, std::memory_order_relaxed);
+                closeGpio();
+            } else if (block % 1000 == 0) {                      // 每 1000 块打一条日志
+                LOGD("Latency test: count=%d, gpio=%d, mute=%d", count, gpio, muted ? 1 : 0);
             }
         }
-
-        if (g_player.mute_audio.load(std::memory_order_relaxed)) {
+        if (muted) {
             memset(audioData, 0, bytes_to_read);
         }
     }
@@ -353,23 +372,8 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_ini
         return JNI_FALSE;
     }
 
-    if (g_player.player_instance) {
-        env->DeleteGlobalRef(g_player.player_instance);
-        g_player.player_instance = nullptr;
-    }
-    g_player.player_instance = env->NewGlobalRef(thiz);
-    if (!g_player.player_instance) {
-        LOGE("Failed to create global reference");
-        return JNI_FALSE;
-    }
-
-    jclass clazz = env->GetObjectClass(thiz);
+    jclass clazz = aaudio_common::bindJavaInstance(env, thiz, g_player.player_instance, "player");
     if (!clazz) {
-        LOGE("Failed to get object class");
-        if (g_player.player_instance) {
-            env->DeleteGlobalRef(g_player.player_instance);
-            g_player.player_instance = nullptr;
-        }
         return JNI_FALSE;
     }
 
@@ -462,8 +466,6 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
         g_player.latency_test_enabled.store(false);
     } else {
         g_player.write_counter.store(0);
-        g_player.gpio_state.store(false);
-        g_player.mute_audio.store(false);
         g_player.latency_test_enabled.store(true);
 
         writeGpioValue(0);
@@ -529,7 +531,10 @@ JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_release
         Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(env, thiz);
     }
 
-    if (g_player.player_instance) {
+    // 所有权守卫 + 互斥：仅删除当前仍指向本实例的全局引用——旋转/重建时旧实例延迟排队的
+    // release（旧 executor 线程）与 initializeNative（主线程）经 jniBindMutex 互斥，杜绝二次释放
+    std::lock_guard<std::mutex> lock(aaudio_common::jniBindMutex());
+    if (g_player.player_instance && env->IsSameObject(thiz, g_player.player_instance)) {
         env->DeleteGlobalRef(g_player.player_instance);
         g_player.player_instance = nullptr;
     }

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #ifndef AAC_LOG_TAG
@@ -51,6 +52,35 @@ struct JniThreadAttachment {
 
     [[nodiscard]] bool ok() const { return env != nullptr; }
 };
+
+// 守护全局 JNI 引用（player_instance/recorder_instance）的绑定与释放。initializeNative 在
+// 主线程、releaseNative 在旧 executor 线程，二者交错会把全局引用二次释放；控制路径加锁零成本。
+inline std::mutex& jniBindMutex() {
+    static std::mutex m;
+    return m;
+}
+
+// JNI 绑定样板：替换 instance 全局引用并返回其类（失败时清理引用并返回 nullptr）。
+// player/recorder 的 initializeNative 共用此段（判空删旧引用 → NewGlobalRef → GetObjectClass）。
+inline jclass bindJavaInstance(JNIEnv* env, jobject thiz, jobject& instance, const char* what) {
+    std::lock_guard<std::mutex> lock(jniBindMutex());
+    if (instance) {
+        env->DeleteGlobalRef(instance);
+        instance = nullptr;
+    }
+    instance = env->NewGlobalRef(thiz);
+    if (!instance) {
+        AAC_LOGW("Failed to create global reference for %s", what);
+        return nullptr;
+    }
+    jclass clazz = env->GetObjectClass(thiz);
+    if (!clazz) {
+        AAC_LOGW("Failed to get object class for %s", what);
+        env->DeleteGlobalRef(instance);
+        instance = nullptr;
+    }
+    return clazz;
+}
 
 // 无参回调通知：JNI 引用判空 + attach + CallVoidMethod
 inline void callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, const char* name) {

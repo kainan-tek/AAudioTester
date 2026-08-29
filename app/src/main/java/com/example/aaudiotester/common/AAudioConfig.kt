@@ -24,6 +24,8 @@ data class AAudioConfig(
 ) {
     companion object {
         private const val TAG = "AAudioConfig"
+        /** 单一默认值来源：data class 默认值、parseConfigs 回退、getDefaultConfigs 均以此为基准 */
+        private val DEFAULT = AAudioConfig()
 
         fun loadConfigs(context: Context, section: String): List<AAudioConfig> = try {
             ConfigLoader.loadStream(
@@ -45,15 +47,15 @@ data class AAudioConfig(
                 runCatching {
                     val c = entries.item(i) as Element
                     AAudioConfig(
-                        usage = c.childText("usage", "AAUDIO_USAGE_MEDIA"),
-                        contentType = c.childText("contentType", "AAUDIO_CONTENT_TYPE_MUSIC"),
-                        inputPreset = c.childText("inputPreset", "AAUDIO_INPUT_PRESET_GENERIC"),
-                        sampleRate = c.childInt("sampleRate", 48000),
-                        channelCount = c.childInt("channelCount", 1),
-                        format = c.childInt("format", 16),
-                        performanceMode = c.childText("performanceMode", "AAUDIO_PERFORMANCE_MODE_LOW_LATENCY"),
-                        sharingMode = c.childText("sharingMode", "AAUDIO_SHARING_MODE_SHARED"),
-                        audioFilePath = c.childText("audioFilePath", ""),
+                        usage = c.childText("usage", DEFAULT.usage),
+                        contentType = c.childText("contentType", DEFAULT.contentType),
+                        inputPreset = c.childText("inputPreset", DEFAULT.inputPreset),
+                        sampleRate = c.childInt("sampleRate", DEFAULT.sampleRate),
+                        channelCount = c.childInt("channelCount", DEFAULT.channelCount),
+                        format = c.childInt("format", DEFAULT.format),
+                        performanceMode = c.childText("performanceMode", DEFAULT.performanceMode),
+                        sharingMode = c.childText("sharingMode", DEFAULT.sharingMode),
+                        audioFilePath = c.childText("audioFilePath", DEFAULT.audioFilePath),
                         description = c.childText("description", "Custom Configuration"),
                     )
                 }.onFailure {
@@ -66,19 +68,13 @@ data class AAudioConfig(
             Log.w(TAG, "Using hardcoded emergency configuration for $section")
             return listOf(
                 if (section == "player") {
+                    // 其余字段与 data class 默认值相同，只写差异字段
                     AAudioConfig(
-                        usage = "AAUDIO_USAGE_MEDIA",
-                        contentType = "AAUDIO_CONTENT_TYPE_MUSIC",
                         audioFilePath = AAudioConstants.DEFAULT_ASSET,
                         description = "Emergency Fallback - Media Playback"
                     )
                 } else {
-                    AAudioConfig(
-                        inputPreset = "AAUDIO_INPUT_PRESET_GENERIC",
-                        sampleRate = 48000, channelCount = 1, format = 16,
-                        audioFilePath = "",
-                        description = "Emergency Fallback - Mono Recording"
-                    )
+                    AAudioConfig(description = "Emergency Fallback - Mono Recording")
                 }
             )
         }

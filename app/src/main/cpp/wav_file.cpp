@@ -6,12 +6,21 @@
 
 #include <android/log.h>
 
+#include "aaudio_common.h"
+
 // 日志宏仅在 .cpp 内定义（头文件不定义，避免与 player/recorder 的 LOG_TAG 冲突）
 #define LOG_TAG "AAudioWavFile"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+namespace {
+
+// WAVE_FORMAT_EXTENSIBLE：真实格式在 fmt chunk 的 subformat GUID 前 2 字节（偏移 24）
+constexpr uint16_t kWaveFormatExtensible = 0xFFFE;
+
+}  // namespace
 
 WavFile::WavFile() : is_open_(false), data_size_(0) {}
 
@@ -79,7 +88,7 @@ bool WavFile::openWrite(const std::string& filePath, int32_t sampleRate,
     write_format_ = format;
     header_.sample_rate = static_cast<uint32_t>(sampleRate);
     header_.num_channels = static_cast<uint16_t>(channelCount);
-    header_.bits_per_sample = static_cast<uint16_t>(getBytesPerSample(format) * 8);
+    header_.bits_per_sample = static_cast<uint16_t>(aaudio_common::bytesPerSample(format) * 8);
     data_size_ = 0;
 
     out_.open(filePath, std::ios::binary | std::ios::out | std::ios::trunc);
@@ -185,20 +194,6 @@ bool WavFile::isValidFormat() const {
            header_.subchunk2_size > 0;
 }
 
-int32_t WavFile::getBytesPerSample(aaudio_format_t format) {
-    switch (format) {
-        case AAUDIO_FORMAT_PCM_I16:
-            return 2;
-        case AAUDIO_FORMAT_PCM_I24_PACKED:
-            return 3;
-        case AAUDIO_FORMAT_PCM_I32:
-        case AAUDIO_FORMAT_PCM_FLOAT:
-            return 4;
-        default:
-            return 2;
-    }
-}
-
 bool WavFile::readHeader() {
     in_.seekg(0, std::ios::beg);
     if (!in_.good()) {
@@ -256,8 +251,25 @@ bool WavFile::readFmtChunk() {
             in_.read(reinterpret_cast<char*>(&header_.byte_rate), 4);
             in_.read(reinterpret_cast<char*>(&header_.block_align), 2);
             in_.read(reinterpret_cast<char*>(&header_.bits_per_sample), 2);
-            if (chunk_size > 16) {
-                skipChunk(chunk_size - 16);
+            size_t consumed = 16;
+            if (header_.audio_format == kWaveFormatExtensible) {
+                // EXTENSIBLE：偏移 16 起 cbSize(2)+validBits(2)+channelMask(4)，偏移 24 起 subformat
+                if (chunk_size < 26) {
+                    LOGE("Invalid EXTENSIBLE fmt chunk size: %u", chunk_size);
+                    return false;
+                }
+                in_.seekg(8, std::ios::cur);
+                uint16_t subformat_tag = 0;
+                in_.read(reinterpret_cast<char*>(&subformat_tag), 2);
+                if (in_.gcount() != 2) {
+                    LOGE("Failed to read subformat tag");
+                    return false;
+                }
+                header_.audio_format = subformat_tag;  // 覆盖为真实格式（1=PCM / 3=float）
+                consumed = 26;
+            }
+            if (chunk_size > consumed) {
+                skipChunk(static_cast<uint32_t>(chunk_size - consumed));
             }
             return true;
         } else {
