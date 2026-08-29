@@ -12,14 +12,14 @@ SAMPLE_RATE = 48000
 CHANNELS = 2
 BITS = 16
 DURATION = 20.0
-PEAK = 0.25  # 归一化峰值振幅，压低保证不刺耳
-FADE = 0.02  # 20ms 淡入淡出，避免噪声起始/结束爆音
-SEED = 20260827  # 与 AudioTester 同种子 → 内容一致
+PEAK = 0.25  # normalized peak amplitude, kept low to avoid harshness
+FADE = 0.02  # 20ms fade in/out to avoid pops at noise start/end
+SEED = 20260827  # same seed as AudioTester → identical content
 
 rng = random.Random(SEED)
 n = int(SAMPLE_RATE * DURATION)
 
-# 第一遍：生成浮点粉噪并记录峰值（Paul Kellett 6 极点近似，-3dB/oct）
+# Pass 1: generate float pink noise and track the peak (Paul Kellett 6-pole approximation, -3dB/oct)
 frames = array.array('f')
 b0 = b1 = b2 = b3 = b4 = b5 = b6 = 0.0
 peak = 0.0
@@ -38,12 +38,12 @@ for _ in range(n):
         peak = a
     frames.append(v)
 
-# 第二遍：归一化到 PEAK，加淡入淡出，写 16bit PCM int
+# Pass 2: normalize to PEAK, apply fade in/out, write 16-bit PCM int
 gain = PEAK / peak
 MAX_I16 = 32767
 fade_samples = int(FADE * SAMPLE_RATE)
 buf = bytearray(n * CHANNELS * (BITS // 8))
-fmt = struct.Struct("<hh")  # 立体声，双声道同值
+fmt = struct.Struct("<hh")  # stereo, both channels identical
 for i in range(n):
     env = 1.0
     if i < fade_samples:

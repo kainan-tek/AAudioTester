@@ -1,7 +1,7 @@
 #pragma once
 //
-// player/recorder 共享的基础设施与音频公共逻辑（单一事实源）。
-// 全部为无状态 inline 函数/RAII，无 ODR 风险。
+// Shared infrastructure and common audio logic for player/recorder (single source of truth).
+// All are stateless inline functions/RAII, so there is no ODR risk.
 //
 
 #include <jni.h>
@@ -53,15 +53,17 @@ struct JniThreadAttachment {
     [[nodiscard]] bool ok() const { return env != nullptr; }
 };
 
-// 守护全局 JNI 引用（player_instance/recorder_instance）的绑定与释放。initializeNative 在
-// 主线程、releaseNative 在旧 executor 线程，二者交错会把全局引用二次释放；控制路径加锁零成本。
+// Guards binding/releasing of the global JNI references (player_instance/recorder_instance).
+// initializeNative runs on the main thread while releaseNative runs on the old executor thread;
+// interleaving could double-release a global reference; locking the control path is near zero cost.
 inline std::mutex& jniBindMutex() {
     static std::mutex m;
     return m;
 }
 
-// JNI 绑定样板：替换 instance 全局引用并返回其类（失败时清理引用并返回 nullptr）。
-// player/recorder 的 initializeNative 共用此段（判空删旧引用 → NewGlobalRef → GetObjectClass）。
+// JNI binding boilerplate: replaces the instance global reference and returns its class
+// (cleans up the reference and returns nullptr on failure).
+// Shared by initializeNative of both player/recorder (delete old ref if non-null → NewGlobalRef → GetObjectClass).
 inline jclass bindJavaInstance(JNIEnv* env, jobject thiz, jobject& instance, const char* what) {
     std::lock_guard<std::mutex> lock(jniBindMutex());
     if (instance) {
@@ -82,7 +84,7 @@ inline jclass bindJavaInstance(JNIEnv* env, jobject thiz, jobject& instance, con
     return clazz;
 }
 
-// 无参回调通知：JNI 引用判空 + attach + CallVoidMethod
+// No-arg callback notification: null-check JNI refs + attach + CallVoidMethod
 inline void callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, const char* name) {
     if (!jvm || !instance || !method) {
         AAC_LOGW("Cannot notify %s: JNI references not set", name);
@@ -96,7 +98,7 @@ inline void callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, cons
     attach.env->CallVoidMethod(instance, method);
 }
 
-// 带字符串参数的错误回调通知
+// Error callback notification with a string argument
 inline void notifyErrorToJava(JavaVM* jvm, jobject instance, jmethodID method, const std::string& error,
                               const char* name) {
     if (!jvm || !instance || !method) {
@@ -113,7 +115,7 @@ inline void notifyErrorToJava(JavaVM* jvm, jobject instance, jmethodID method, c
     attach.env->DeleteLocalRef(error_str);
 }
 
-// format → 每样本字节数（未知格式按 16bit 处理）
+// format → bytes per sample (unknown formats treated as 16-bit)
 inline int32_t bytesPerSample(aaudio_format_t format) {
     switch (format) {
         case AAUDIO_FORMAT_PCM_I24_PACKED:
@@ -127,13 +129,13 @@ inline int32_t bytesPerSample(aaudio_format_t format) {
     }
 }
 
-// 缓冲容量档位：低延迟 40ms，其余 100ms
+// Buffer capacity tiers: 40ms for low latency, 100ms otherwise
 inline int32_t bufferCapacityFrames(int32_t sample_rate, aaudio_performance_mode_t mode) {
     return (mode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY) ? (sample_rate * 40) / 1000
                                                          : (sample_rate * 100) / 1000;
 }
 
-// 按 burst 优化缓冲大小：低延迟 2 burst，其余 4 burst（不超过容量）
+// Optimize buffer size by burst: 2 bursts for low latency, 4 otherwise (capped at capacity)
 inline void optimizeBufferSize(AAudioStream* stream, aaudio_performance_mode_t mode) {
     int32_t frames_per_burst = AAudioStream_getFramesPerBurst(stream);
     if (frames_per_burst > 0) {
@@ -141,14 +143,14 @@ inline void optimizeBufferSize(AAudioStream* stream, aaudio_performance_mode_t m
         optimal_size = std::min(optimal_size, AAudioStream_getBufferCapacityInFrames(stream));
         const int32_t result = AAudioStream_setBufferSizeInFrames(stream, optimal_size);
         if (result < 0) {
-            // 失败会静默沿用默认容量，低延迟测试结果失真，必须可见
+            // On failure the default capacity is silently kept, distorting low-latency test results — this must be visible
             AAC_LOGW("setBufferSizeInFrames(%d) failed: %s", optimal_size,
                      AAudio_convertResultToText(result));
         }
     }
 }
 
-// 停流并等待完成（100ms 超时）；失败仅告警，不阻断清理流程
+// Stop the stream and wait for completion (100ms timeout); failure only logs a warning and does not block cleanup
 inline void stopStreamAndWait(AAudioStream* stream) {
     aaudio_result_t result = AAudioStream_requestStop(stream);
     if (result != AAUDIO_OK) {

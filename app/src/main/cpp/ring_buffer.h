@@ -1,13 +1,16 @@
-// ring_buffer.h — 无锁 SPSC（单生产者/单消费者）字节环形缓冲。
+// ring_buffer.h — Lock-free SPSC (single-producer/single-consumer) byte ring buffer.
 //
-// 用途：在 AAudio 实时回调线程与一个普通工作线程之间传递 PCM 数据，
-// 把磁盘 I/O 完全移出实时回调。回调线程只调用非阻塞的 read()/write()；
-// 工作线程侧以「轮询 + 短暂睡眠」限速，避免在回调侧引入任何锁或等待。
+// Purpose: transfer PCM data between the AAudio real-time callback thread and a
+// regular worker thread, moving disk I/O completely out of the real-time callback.
+// The callback thread only calls non-blocking read()/write();
+// the worker thread throttles via "polling + brief sleep", avoiding any lock or wait
+// on the callback side.
 //
-// 约束：
-//   - 容量必须为 2 的幂（用位掩码取模）。
-//   - 同一时刻只能有一个生产者、一个消费者（SPSC）。
-//   - read()/write() 尽力而为：返回实际处理字节数，可能小于请求值。
+// Constraints:
+//   - Capacity must be a power of 2 (modulo via bitmask).
+//   - Only one producer and one consumer at a time (SPSC).
+//   - read()/write() are best-effort: they return the actual number of bytes processed,
+//     which may be less than requested.
 
 #ifndef AAUDIOTESTER_RING_BUFFER_H_
 #define AAUDIOTESTER_RING_BUFFER_H_
@@ -25,16 +28,16 @@ public:
 
     size_t capacity() const { return buf_.size(); }
 
-    // 可读字节数（消费者侧）
+    // Bytes available for reading (consumer side)
     size_t readable() const {
         return write_pos_.load(std::memory_order_acquire) -
                read_pos_.load(std::memory_order_acquire);
     }
 
-    // 可写字节数（生产者侧）
+    // Bytes available for writing (producer side)
     size_t writable() const { return capacity() - readable(); }
 
-    // 生产者：尽力写入，返回实际写入字节数（空间不足只写能装下的部分）。
+    // Producer: best-effort write, returns actual bytes written (only writes what fits if space is low).
     size_t write(const char* src, size_t n) {
         n = std::min(n, writable());
         const size_t w = write_pos_.load(std::memory_order_relaxed);
@@ -46,14 +49,14 @@ public:
         return n;
     }
 
-    // 生产者：整段写入——空间足够才写，否则一个字节都不写。供「整帧要么全进、要么全丢」场景。
+    // Producer: all-or-nothing write — only writes if enough space, otherwise writes nothing. For "whole frame in or drop" scenarios.
     bool tryWrite(const char* src, size_t n) {
         if (n > writable()) return false;
         write(src, n);
         return true;
     }
 
-    // 消费者：尽力读取，返回实际读取字节数（数据不足只读能读到的部分）。
+    // Consumer: best-effort read, returns actual bytes read (only reads what is available if data is low).
     size_t read(char* dst, size_t n) {
         n = std::min(n, readable());
         const size_t r = read_pos_.load(std::memory_order_relaxed);
@@ -72,7 +75,7 @@ private:
     std::atomic<size_t> write_pos_{0};
 };
 
-// 推荐默认容量（字节，须为 2 的幂）：1 MiB ≈ 5.5 秒 @48kHz/16bit/立体声。
+// Recommended default capacity (bytes, must be a power of 2): 1 MiB ≈ 5.5 s @48kHz/16bit/stereo.
 static constexpr size_t kDefaultRingCapacity = 1u << 20;
 
 #endif  // AAUDIOTESTER_RING_BUFFER_H_

@@ -19,7 +19,7 @@ class RecorderFragment : AAudioTestFragment() {
         failed = "Recording failed",
     )
 
-    // Recorder 无音频焦点监听，不需要 executor
+    // The recorder has no audio focus listener, so no executor is needed
     override fun createEngine(context: Context, engineExecutor: Executor): AAudioEngine =
         AAudioRecorder(context)
 

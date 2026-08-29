@@ -82,7 +82,7 @@ adb logcat -s AAudioPlayer AAudioRecorder
 </player>
 ```
 
-外部热更新：将配置放 `/data/aaudio_configs.xml`（优先于 assets，需系统权限，见「高级：系统级部署」）。标记 `[需系统权限]` 的配置在普通安装下会失败，属预期行为。
+外部热更新：将配置放 `/data/aaudio_configs.xml`（优先于 assets，需系统权限，见「高级：系统级部署」）。标记 `[Requires system permission]` 的配置在普通安装下会失败，属预期行为。
 
 ## 已知限制
 

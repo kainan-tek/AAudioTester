@@ -1,6 +1,6 @@
 package com.example.aaudiotester.common
 
-/** 最小驱动接口：基类 Fragment 多态驱动播放/录音两引擎。 */
+/** Minimal driver interface: the base Fragment polymorphically drives both the playback and recording engines. */
 interface AAudioEngine {
     interface Listener {
         fun onStarted()

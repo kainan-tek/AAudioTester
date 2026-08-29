@@ -43,13 +43,13 @@ struct AudioPlayerState {
     std::atomic<bool> is_playing{false};
     std::atomic<bool> callback_notified{false};  // true if Java already notified by callback
 
-    // 播放数据缓冲：读线程(生产) → 回调(消费)，把磁盘 I/O 移出实时回调。
+    // Playback data buffer: reader thread (producer) → callback (consumer), moving disk I/O out of the real-time callback.
     std::unique_ptr<SpScRingBuffer> ring;
     std::thread read_thread;
     std::atomic<bool> eof_reached{false};
     std::atomic<bool> stop_read_thread{false};
     std::atomic<size_t> underrun_count{0};
-    // RT 回调置位的终止错误（静态串，无分配）：由读线程在非 RT 线程投递，回调线程不碰 JNI
+    // Terminal error set by the RT callback (static string, no allocation): delivered by the reader thread on a non-RT thread; the callback thread never touches JNI
     std::atomic<const char*> rt_error_msg{nullptr};
 
     JavaVM* jvm = nullptr;
@@ -65,7 +65,7 @@ struct AudioPlayerState {
     std::string audio_file_path = "/data/48k_2ch_16bit.wav";
 
 #if LATENCY_TEST_ENABLE
-    std::atomic<int> write_counter{0};   // 唯一事实源：块号推导静音与 GPIO 电平
+    std::atomic<int> write_counter{0};   // Single source of truth: block number derives mute and GPIO level
     std::atomic<bool> latency_test_enabled{false};
     int gpio_fd = -1;
 #endif
@@ -132,8 +132,8 @@ static void notifyPlaybackStopped() {
 }
 
 static void notifyPlaybackError(const std::string& error) {
-    // 原子判重：rt_error 路径与 errorCallback 可能并发投递，只通知一次；
-    // 已置位（stopped/error）则忽略，后续 stopNativePlayback 也不补发 onStopped 覆盖错误提示
+    // Atomic dedup: the rt_error path and errorCallback may deliver concurrently; notify only once.
+    // If already set (stopped/error), ignore; subsequent stopNativePlayback also won't resend onStopped over an error notice
     if (g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
@@ -141,7 +141,7 @@ static void notifyPlaybackError(const std::string& error) {
                                      error, "playback error");
 }
 
-// 停止读线程并 join（start 失败与正常 stop 共用）。
+// Stop the reader thread and join (shared by failed start and normal stop).
 static void stopReadThread() {
     g_player.stop_read_thread.store(true, std::memory_order_release);
     if (g_player.read_thread.joinable()) {
@@ -149,17 +149,17 @@ static void stopReadThread() {
     }
 }
 
-// 播放读线程：持续把 WAV 数据读入环形缓冲，回调线程只 memcpy、永不碰磁盘。
-// 兼作终止通知线程：EOF/RT 错误的 JNI 通知在此（非 RT 线程）投递，回调线程只置位。
+// Playback reader thread: keeps reading WAV data into the ring buffer; the callback thread only memcpys and never touches disk.
+// Also serves as the termination notification thread: EOF/RT error JNI notifications are delivered here (non-RT thread); the callback thread only sets flags.
 static void playReadThread() {
-    // 24-bit 帧大小(6/12...)不整除 64KB：缓冲取整到帧倍数，保证环形缓冲内容始终帧对齐
+    // 24-bit frame sizes (6/12...) don't divide 64KB evenly: round the buffer down to a frame multiple so ring contents stay frame-aligned
     const size_t frame_size =
         aaudio_common::bytesPerSample(g_player.wav_file->getAAudioFormat()) *
         static_cast<size_t>(g_player.wav_file->getChannelCount());
     const size_t buf_size = (64 * 1024) / frame_size * frame_size;
     std::vector<char> buf(buf_size);
     while (!g_player.stop_read_thread.load(std::memory_order_acquire)) {
-        // RT 回调置的终止错误：在此投递，避免回调线程做 JNI
+        // Terminal error set by the RT callback: delivered here to avoid JNI on the callback thread
         if (const char* msg = g_player.rt_error_msg.load(std::memory_order_acquire)) {
             g_player.rt_error_msg.store(nullptr, std::memory_order_release);
             g_player.is_playing.store(false, std::memory_order_release);
@@ -169,13 +169,13 @@ static void playReadThread() {
         const size_t n = g_player.wav_file->readAudioData(buf.data(), buf.size());
         if (n == 0) {
             if (g_player.wav_file->hasReadError()) {
-                // I/O 错误或文件截断：按错误上报，而非伪装成正常 EOF
+                // I/O error or truncated file: report as an error rather than faking a normal EOF
                 g_player.is_playing.store(false, std::memory_order_release);
                 notifyPlaybackError("[FILE] Audio read failed or file truncated");
                 return;
             }
-            g_player.eof_reached.store(true, std::memory_order_release);  // 文件读尽
-            // 等回调排空 ring 后再通知 stopped（RT 回调只 return STOP，不碰 JNI）
+            g_player.eof_reached.store(true, std::memory_order_release);  // File fully read
+            // Wait for the callback to drain the ring before notifying stopped (RT callback only returns STOP, never touches JNI)
             while (!g_player.stop_read_thread.load(std::memory_order_acquire) &&
                    g_player.ring->readable() > 0 &&
                    g_player.rt_error_msg.load(std::memory_order_acquire) == nullptr) {
@@ -188,19 +188,19 @@ static void playReadThread() {
             } else if (!g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
                 notifyPlaybackStopped();
             }
-            // EOF 播放结束：主动关流释放硬件 session（start/release 的 reset 兜底幂等；
-            // executor 侧对 stream 的操作均在 join 读线程之后，故无并发 reset）
+            // EOF: playback ended, proactively close the stream to release the hardware session (start/release resets are idempotent fallbacks;
+            // executor-side stream operations all happen after joining the reader thread, so there is no concurrent reset)
             if (g_player.stream) g_player.stream.reset();
             return;
         }
         size_t off = 0;
         while (off < n && !g_player.stop_read_thread.load(std::memory_order_acquire)) {
-            if (g_player.rt_error_msg.load(std::memory_order_acquire)) break;  // 提前让位错误投递
+            if (g_player.rt_error_msg.load(std::memory_order_acquire)) break;  // Yield early to error delivery
             off += g_player.ring->write(buf.data() + off, n - off);
             if (off < n) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
-    // 退出前投递 RT 回调在 stop 竞态窗口内可能已置的错误
+    // Before exit, deliver an error the RT callback may have set during the stop race window
     if (const char* msg = g_player.rt_error_msg.load(std::memory_order_acquire)) {
         g_player.rt_error_msg.store(nullptr, std::memory_order_release);
         g_player.is_playing.store(false, std::memory_order_release);
@@ -217,13 +217,13 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
     }
 
     if (!g_player.wav_file || !g_player.wav_file->isOpen()) {
-        // 只置位，JNI 通知由读线程在非 RT 线程投递（回调线程禁止 JNI）
+        // Only set the flag; JNI notification is delivered by the reader thread on a non-RT thread (no JNI on the callback thread)
         g_player.rt_error_msg.store("[FILE] Audio file not opened", std::memory_order_release);
         g_player.is_playing.store(false, std::memory_order_release);
         return AAUDIO_CALLBACK_RESULT_STOP;
     }
 
-    // 回调参数守卫：清状态并置位，与上方文件异常分支模式一致（原裸 return 会致 UI 卡“进行中”）
+    // Callback argument guard: clear state and set the flag, matching the file-error branch above (a bare return would leave the UI stuck on "in progress")
     int32_t channel_count = AAudioStream_getChannelCount(stream);
     if (numFrames <= 0 || channel_count <= 0 || channel_count > 16) {
         LOGE("Invalid callback args: numFrames=%d, channelCount=%d", numFrames, channel_count);
@@ -241,15 +241,15 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
     const size_t bytes_read =
         g_player.ring->read(static_cast<char*>(audioData), static_cast<size_t>(bytes_to_read));
 
-    // 只补尾部静音：underrun 或尾部不足时补零避免残留旧数据（满数据时零开销）
+    // Only pad trailing silence: zero-fill on underrun or a short tail to avoid stale data (no cost when full)
     if (bytes_read < static_cast<size_t>(bytes_to_read)) {
         memset(static_cast<char*>(audioData) + bytes_read, 0, bytes_to_read - bytes_read);
     }
 
     if (bytes_read == 0) {
-        // 缓冲空：数据已播尽(EOF) 或 读线程尚未填上(underrun，本次输出静音)。
+        // Buffer empty: data fully played (EOF) or the reader thread hasn't filled it yet (underrun, output silence this time).
         if (g_player.eof_reached.load(std::memory_order_acquire)) {
-            // 终止通知（stopped/错误）由读线程在非 RT 线程投递，此处只 return STOP
+            // Termination notification (stopped/error) is delivered by the reader thread on a non-RT thread; here just return STOP
             return AAUDIO_CALLBACK_RESULT_STOP;
         }
         g_player.underrun_count.fetch_add(1, std::memory_order_relaxed);
@@ -257,17 +257,17 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
 
 #if LATENCY_TEST_ENABLE
     if (g_player.latency_test_enabled.load(std::memory_order_relaxed)) {
-        // 单一事实源：块号推导 GPIO 与静音，无独立状态可失步
+        // Single source of truth: block number derives GPIO and mute; no independent state to drift
         const int count = g_player.write_counter.fetch_add(1);   // 0-based
         const int block = count / LATENCY_TEST_INTERVAL;
-        const bool muted = (block & 1) == 0;                     // 偶数块静音
-        if (count % LATENCY_TEST_INTERVAL == 0) {                // 块起点（count=0 即首个）
-            const int gpio = (block + 1) & 1;                    // +1 对齐 init 的低电平：block0 写 1 出首条边沿
+        const bool muted = (block & 1) == 0;                     // even blocks muted
+        if (count % LATENCY_TEST_INTERVAL == 0) {                // block start (count=0 is the first)
+            const int gpio = (block + 1) & 1;                    // +1 aligns with init's low level: block0 writes 1 to produce the first edge
             if (!writeGpioValue(gpio)) {
-                // GPIO 失败：参考丢失，禁用测试，避免音频继续空切静音
+                // GPIO failure: reference lost, disable the test to avoid muting audio into silence
                 g_player.latency_test_enabled.store(false, std::memory_order_relaxed);
                 closeGpio();
-            } else if (block % 1000 == 0) {                      // 每 1000 块打一条日志
+            } else if (block % 1000 == 0) {                      // log once every 1000 blocks
                 LOGD("Latency test: count=%d, gpio=%d, mute=%d", count, gpio, muted ? 1 : 0);
             }
         }
@@ -283,7 +283,7 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
 static void errorCallback(AAudioStream* stream, void* userData, aaudio_result_t error) {
     LOGE("AAudio error: %s", AAudio_convertResultToText(error));
     g_player.is_playing.store(false, std::memory_order_release);
-    // 通知 Java 后由 Fragment.onError 经 stop() 清理资源（关流、join 读线程）
+    // After notifying Java, Fragment.onError cleans up via stop() (close stream, join reader thread)
     std::string error_msg = "[STREAM] Playback stream error: ";
     error_msg += AAudio_convertResultToText(error);
     notifyPlaybackError(error_msg);
@@ -340,8 +340,8 @@ static bool createAAudioStream() {
     LOGI("Stream created: %dHz, %dch, format=%d, mode=%d", actual_rate, actual_channels,
          actual_format, AAudioStream_getPerformanceMode(g_player.stream.get()));
 
-    // AAudio 无 getMinBufferSize：minBurst=AAudioStream_getFramesPerBurst 为最小缓冲单位，
-    // bufferSize=实际缓冲（optimizeBufferSize 已设 2×/4× burst），capacity=上限。
+    // AAudio has no getMinBufferSize: minBurst=AAudioStream_getFramesPerBurst is the minimum buffer unit,
+    // bufferSize=actual buffer (optimizeBufferSize set it to 2x/4x burst), capacity=upper limit.
     int32_t frames_per_burst = AAudioStream_getFramesPerBurst(g_player.stream.get());
     int32_t buffer_size_frames = AAudioStream_getBufferSizeInFrames(g_player.stream.get());
     int32_t capacity_frames = AAudioStream_getBufferCapacityInFrames(g_player.stream.get());
@@ -351,15 +351,16 @@ static bool createAAudioStream() {
          buffer_size_frames, buffer_size_frames * frame_bytes, buffer_size_frames * 1000.0 / actual_rate,
          capacity_frames, capacity_frames * 1000.0 / actual_rate);
 
-    // 流实际声道/格式与 WAV 不一致时按错误处理：回调按流格式消费字节，而 ring 中是
-    // 文件格式布局，不一致会导致变调/噪声且无提示（recorder 侧通过 actual 回写规避）。
+    // If the stream's actual channels/format differ from the WAV, treat as an error: the callback
+    // consumes bytes in stream format while the ring holds file-format layout; a mismatch would cause
+    // pitch shift/noise without notice (the recorder side avoids this by writing back actual values).
     if (actual_channels != channel_count || actual_format != format) {
         LOGE("Stream params mismatch: requested %dch/fmt%d, actual %dch/fmt%d", channel_count,
              format, actual_channels, actual_format);
         g_player.stream.reset();
         return false;
     }
-    // 采样率由框架自动重采样，仅告警（个别设备 openStream 返回重采样后的 rate）
+    // Sample rate is resampled automatically by the framework; warn only (some devices return the resampled rate from openStream)
     if (actual_rate != sample_rate) {
         LOGW("Sample rate adapted: %d requested, %d actual", sample_rate, actual_rate);
     }
@@ -441,7 +442,7 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
         return JNI_FALSE;
     }
 
-    stopReadThread();  // 清理上次 EOF/error 残留、尚未 join 的读线程，避免对 joinable 线程重新赋值触发 terminate
+    stopReadThread();  // Clean up the leftover/unjoined reader thread from the last EOF/error, avoiding reassigning a joinable thread (which would terminate)
 
     g_player.callback_notified.store(false, std::memory_order_release);
 
@@ -459,7 +460,7 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
         return JNI_FALSE;
     }
 
-    // 环形缓冲 + 读线程：文件流式进入缓冲，回调只 memcpy（磁盘 I/O 移出实时线程）。
+    // Ring buffer + reader thread: the file streams into the buffer, the callback only memcpys (disk I/O moved off the real-time thread).
     g_player.ring = std::make_unique<SpScRingBuffer>(kDefaultRingCapacity);
     g_player.eof_reached.store(false, std::memory_order_release);
     g_player.stop_read_thread.store(false, std::memory_order_release);
@@ -520,7 +521,7 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
     closeGpio();
 #endif
 
-    // 一次性 latch：首个 claimer 才通知 stopped（error/EOF 已置位则跳过），避免双通知
+    // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set), avoiding double notification
     if (!g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
         notifyPlaybackStopped();
     }
@@ -537,9 +538,11 @@ JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_release
         Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(env, thiz);
     }
 
-    // 所有权守卫 + 互斥：仅删除当前仍指向本实例的全局引用——旋转/重建时旧实例延迟排队的
-    // release（旧 executor 线程）与 initializeNative（主线程）经 jniBindMutex 互斥，杜绝二次释放。
-    // method ID 只在真正释放本实例时清空：若引用已被新实例替换，method ID 归新实例所有。
+    // Ownership guard + mutex: only delete the global reference if it still points to this instance —
+    // on rotation/recreation, a delayed release queued on the old executor thread and initializeNative on
+    // the main thread are serialized via jniBindMutex, preventing double release.
+    // Method IDs are only cleared when this instance is actually released: if the reference was replaced
+    // by a new instance, the method IDs belong to the new instance.
     std::lock_guard<std::mutex> lock(aaudio_common::jniBindMutex());
     if (g_player.player_instance && env->IsSameObject(thiz, g_player.player_instance)) {
         env->DeleteGlobalRef(g_player.player_instance);

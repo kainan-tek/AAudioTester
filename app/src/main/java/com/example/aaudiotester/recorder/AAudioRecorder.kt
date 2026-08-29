@@ -6,13 +6,13 @@ import com.example.aaudiotester.common.AAudioConfig
 import com.example.aaudiotester.common.AAudioConstants
 import com.example.aaudiotester.common.AAudioEngine
 
-/** 录音引擎：AAudio 输入 + WAV 写出。 */
+/** Recording engine: AAudio input + WAV writing. */
 class AAudioRecorder(context: Context) : AAudioEngine {
 
     companion object {
         private const val TAG = "AAudioRecorder"
         init {
-            // 加载失败时立即抛 UnsatisfiedLinkError（崩溃点即原因点），不吞错推迟到 external 调用处
+            // Fail fast with UnsatisfiedLinkError at load time (crash point == cause point); don't swallow errors and defer to external call sites
             System.loadLibrary("aaudiotester")
         }
     }
@@ -27,16 +27,16 @@ class AAudioRecorder(context: Context) : AAudioEngine {
     private var state = State.IDLE
 
     @Volatile
-    private var errored = false  // 本会话已上报错误：迟到的 started 一律忽略（错误优先、终态）
+    private var errored = false  // This session already reported an error: late started callbacks are ignored (error-first, terminal)
 
     @Volatile
-    private var nativeBound = false  // initializeNative 在旋转重建时可能因旧会话未停而失败，start 时重试
+    private var nativeBound = false  // initializeNative may fail on rotation rebuild if the old session hasn't stopped; retried at start
 
     init {
         nativeBound = initializeNative()
     }
 
-    /** 绑定可重试：旋转重建时旧会话未停会导致初次绑定失败，start 时补绑（native 幂等，重复调用安全） */
+    /** Binding is retryable: on rotation rebuild an unstopped old session can fail the first bind; rebind at start (native is idempotent, repeated calls are safe) */
     private fun ensureNativeBound(): Boolean {
         if (!nativeBound) nativeBound = initializeNative()
         return nativeBound
@@ -52,7 +52,7 @@ class AAudioRecorder(context: Context) : AAudioEngine {
             return
         }
         currentConfig = config
-        // 非 .wav 结尾的路径由 native 层解释为目录并自动生成文件名；无效路径在 start 时报 [FILE] 错误
+        // Paths not ending in .wav are treated as directories by the native layer, which auto-generates a filename; invalid paths report a [FILE] error at start
         val audioFilePath = config.audioFilePath.ifBlank { getDefaultDirectory() }
         setNativeConfig(
             AAudioConstants.getInputPreset(config.inputPreset),
@@ -78,7 +78,7 @@ class AAudioRecorder(context: Context) : AAudioEngine {
             return false
         }
         if (state == State.ERROR) state = State.IDLE
-        errored = false  // 新会话复位
+        errored = false  // reset for a new session
 
         if (!AAudioConstants.isValidSampleRate(currentConfig.sampleRate)) {
             val error = "${AAudioConstants.ErrorTypes.PARAM} Invalid sample rate: ${currentConfig.sampleRate}"
@@ -103,7 +103,7 @@ class AAudioRecorder(context: Context) : AAudioEngine {
     }
 
     override fun stop() {
-        // ERROR 态也进入：清理错误残留的流/文件/写线程（由 Fragment.onError 触发）
+        // Also entered from ERROR state: cleans up the stream/file/writer thread left by an error (triggered by Fragment.onError)
         if (state == State.IDLE) return
         Log.d(TAG, "Stopping recording")
         stopNativeRecording()
@@ -138,10 +138,10 @@ class AAudioRecorder(context: Context) : AAudioEngine {
     private external fun stopNativeRecording(): Boolean
     private external fun releaseNative()
 
-    // 原生层回调
+    // Native layer callbacks
     @Suppress("unused")
     private fun onNativeRecordingStarted() {
-        if (errored) return  // 错误优先：native 已停止，忽略竞态中迟到的 started
+        if (errored) return  // error-first: native already stopped, ignore a started arriving late in a race
         state = State.RECORDING
         listener?.onStarted()
         Log.i(TAG, "Recording started successfully")
@@ -156,7 +156,7 @@ class AAudioRecorder(context: Context) : AAudioEngine {
 
     @Suppress("unused")
     private fun onNativeRecordingError(error: String) {
-        errored = true  // 会话内错误终态
+        errored = true  // terminal error state for this session
         state = State.ERROR
         listener?.onError(error)
         Log.e(TAG, "Recording error: $error")

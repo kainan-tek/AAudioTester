@@ -1,6 +1,6 @@
 #include <jni.h>
 
-// 前置声明（不 include 两个 .h，避免 LOG_TAG 宏重定义）
+// Forward declarations (do not include the two .h files to avoid LOG_TAG macro redefinition)
 void aaudio_player_set_jvm(JavaVM* vm);
 void aaudio_recorder_set_jvm(JavaVM* vm);
 

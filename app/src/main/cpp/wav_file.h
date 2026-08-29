@@ -7,10 +7,11 @@
 
 #include <aaudio/AAudio.h>
 
-// 注意：本头文件不定义 LOG_TAG / LOGx 宏（player.cpp / recorder.cpp 各自定义了
-// LOG_TAG，若本头再定义会在同一编译单元内触发宏重定义错误）。日志宏只在 wav_file.cpp 内定义。
+// NOTE: This header does not define LOG_TAG / LOGx macros (player.cpp / recorder.cpp each define
+// their own LOG_TAG; defining one here would trigger a macro redefinition error in the same
+// translation unit). Logging macros are defined only in wav_file.cpp.
 
-// 合并后的 WAV 文件类：player 读 + recorder 写。
+// Unified WAV file class: read by player + write by recorder.
 class WavFile {
 public:
     WavFile();
@@ -20,10 +21,10 @@ public:
     WavFile(WavFile&&) = delete;
     WavFile& operator=(WavFile&&) = delete;
 
-    // 读模式（player）
+    // Read mode (player)
     bool openRead(const std::string& filePath);
     size_t readAudioData(void* buffer, size_t bufferSize);
-    // 声明的 data 区未能完整读出（I/O 失败或文件截断）
+    // Declared data section could not be fully read (I/O failure or truncated file)
     [[nodiscard]] bool hasReadError() const { return read_error_; }
     int32_t getSampleRate() const;
     int32_t getChannelCount() const;
@@ -31,14 +32,14 @@ public:
     std::string getFormatInfo() const;
     bool isValidFormat() const;
 
-    // 写模式（recorder）
+    // Write mode (recorder)
     bool openWrite(const std::string& filePath, int32_t sampleRate,
                    int32_t channelCount, aaudio_format_t format);
     bool writeData(const void* data, size_t size);
 
-    // 公共
+    // Common
     bool isOpen() const;
-    // 写侧返回"回填头部 + 关闭"是否成功（失败 = 文件不可用，需按错误上报）；读侧恒 true
+    // Write side: whether header backfill + close succeeded (failure = file unusable, report as error); read side: always true
     bool close();
 
 private:
@@ -70,13 +71,13 @@ private:
     bool read_error_ = false;
     aaudio_format_t write_format_ = AAUDIO_FORMAT_PCM_I16;
 
-    // 读辅助
+    // Read helpers
     bool readHeader();
     bool validateRiffHeader();
     bool readFmtChunk();
     bool findDataChunk();
     void skipChunk(uint32_t chunk_size);
-    // 写辅助
+    // Write helpers
     void writeHeader(uint32_t data_size);
 };
 

@@ -8,7 +8,7 @@
 
 #include "aaudio_common.h"
 
-// 日志宏仅在 .cpp 内定义（头文件不定义，避免与 player/recorder 的 LOG_TAG 冲突）
+// Logging macros are defined only in this .cpp (not in the header, to avoid conflict with player/recorder LOG_TAG)
 #define LOG_TAG "AAudioWavFile"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -17,7 +17,7 @@
 
 namespace {
 
-// WAVE_FORMAT_EXTENSIBLE：真实格式在 fmt chunk 的 subformat GUID 前 2 字节（偏移 24）
+// WAVE_FORMAT_EXTENSIBLE: the real format is in the 2 bytes before the subformat GUID in the fmt chunk (offset 24)
 constexpr uint16_t kWaveFormatExtensible = 0xFFFE;
 
 }  // namespace
@@ -61,7 +61,7 @@ size_t WavFile::readAudioData(void* buffer, size_t bufferSize) {
     if (!is_open_ || !buffer || bufferSize == 0) {
         return 0;
     }
-    // 只读 data 区，不越过 data chunk 尾部（尾随元数据 chunk 否则会混入音频）。
+    // Read only the data section, never past the data chunk end (trailing metadata chunks would otherwise mix into the audio).
     bufferSize = std::min(bufferSize, remaining_data_);
     if (bufferSize == 0) {
         return 0;
@@ -72,7 +72,7 @@ size_t WavFile::readAudioData(void* buffer, size_t bufferSize) {
     in_.read(static_cast<char*>(buffer), read_size);
     const auto n = static_cast<size_t>(in_.gcount());
     if (n == 0 && remaining_data_ > 0) {
-        // 声明的 data 区未读完即止：I/O 失败或文件被截断（区别于正常读尽）
+        // Declared data section ended prematurely: I/O failure or truncated file (distinct from a clean EOF)
         read_error_ = true;
     }
     remaining_data_ -= n;
@@ -108,7 +108,7 @@ bool WavFile::writeData(const void* data, size_t size) {
     if (!is_open_ || !data || size == 0) {
         return false;
     }
-    // 4GB 是 WAV 32 位 size 字段上限；须写前检查——写后再查则末块已入盘且 data_size_ 已回绕
+    // 4GB is the limit of the WAV 32-bit size field; must check before writing — checking after would mean the last block is already on disk and data_size_ has wrapped
     if (static_cast<uint64_t>(data_size_) + size > std::numeric_limits<uint32_t>::max()) {
         LOGE("Data size exceeds 4GB WAV limit, refusing write (file finalized at limit)");
         return false;
@@ -160,7 +160,7 @@ int32_t WavFile::getChannelCount() const {
 
 aaudio_format_t WavFile::getAAudioFormat() const {
     if (header_.audio_format == 3) {
-        return AAUDIO_FORMAT_PCM_FLOAT;  // IEEE float WAV → float 流
+        return AAUDIO_FORMAT_PCM_FLOAT;  // IEEE float WAV → float stream
     }
     switch (header_.bits_per_sample) {
         case 16:
@@ -184,7 +184,7 @@ std::string WavFile::getFormatInfo() const {
 }
 
 bool WavFile::isValidFormat() const {
-    // PCM (format 1) 或 IEEE float (format 3, 32-bit，录音器在设备替换格式时可能写出)。
+    // PCM (format 1) or IEEE float (format 3, 32-bit, which the recorder may write when the device substitutes the format).
     const bool pcm = header_.audio_format == 1;
     const bool float32 = header_.audio_format == 3 && header_.bits_per_sample == 32;
     return (pcm || float32) && header_.num_channels > 0 && header_.num_channels <= 16 &&
@@ -240,7 +240,7 @@ bool WavFile::readFmtChunk() {
 
         if (strncmp(chunk_id, "fmt ", 4) == 0) {
             if (chunk_size < 16) {
-                // 不足 16 字节时字段读取会越过 chunk 边界，参数全为垃圾值
+                // With fewer than 16 bytes the field reads would cross the chunk boundary, leaving garbage values
                 LOGE("Invalid fmt chunk size: %u", chunk_size);
                 return false;
             }
@@ -253,7 +253,7 @@ bool WavFile::readFmtChunk() {
             in_.read(reinterpret_cast<char*>(&header_.bits_per_sample), 2);
             size_t consumed = 16;
             if (header_.audio_format == kWaveFormatExtensible) {
-                // EXTENSIBLE：偏移 16 起 cbSize(2)+validBits(2)+channelMask(4)，偏移 24 起 subformat
+                // EXTENSIBLE: from offset 16: cbSize(2)+validBits(2)+channelMask(4); from offset 24: subformat
                 if (chunk_size < 26) {
                     LOGE("Invalid EXTENSIBLE fmt chunk size: %u", chunk_size);
                     return false;
@@ -265,7 +265,7 @@ bool WavFile::readFmtChunk() {
                     LOGE("Failed to read subformat tag");
                     return false;
                 }
-                header_.audio_format = subformat_tag;  // 覆盖为真实格式（1=PCM / 3=float）
+                header_.audio_format = subformat_tag;  // Override with the real format (1=PCM / 3=float)
                 consumed = 26;
             }
             if (chunk_size > consumed) {

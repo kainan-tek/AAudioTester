@@ -25,7 +25,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
 /**
- * 抽象基类：共享全部 UI 接线（状态/按钮/Spinner/信息区/权限/互斥）。
+ * Abstract base class: shares all UI wiring (status/buttons/Spinner/info area/permissions/exclusivity).
  */
 abstract class AAudioTestFragment : Fragment() {
 
@@ -38,8 +38,8 @@ abstract class AAudioTestFragment : Fragment() {
 
     private lateinit var engine: AAudioEngine
 
-    // native 层为全局单例状态：所有触碰 native 的调用（setAudioConfig/start/stop/release）
-    // 经此单线程串行执行，既消除并发竞争，也避免阻塞主线程
+    // The native layer is a global singleton: all native-touching calls (setAudioConfig/start/stop/release)
+    // are serialized through this single-threaded executor, eliminating races and avoiding main-thread blocking
     private val engineExecutor = Executors.newSingleThreadExecutor()
     private lateinit var statusText: TextView
     private lateinit var infoText: TextView
@@ -50,7 +50,8 @@ abstract class AAudioTestFragment : Fragment() {
     private var availableConfigs: List<AAudioConfig> = emptyList()
     private var currentConfig: AAudioConfig? = null
 
-    // 权限"永久拒绝"判定需先申请过至少一次：首次拒绝时 rationale 尚不可展示，不能误导向设置页
+    // "Permanently denied" can only be determined after requesting at least once: on the first denial the
+    // rationale isn't showable yet, so don't mislead users to the settings page
     private var permissionRequestedOnce = false
 
     private val permissionLauncher =
@@ -60,7 +61,7 @@ abstract class AAudioTestFragment : Fragment() {
                 startInternal()
                 return@registerForActivityResult
             }
-            // AAOS 车机上 Toast 不可见，故用对话框反馈；永久拒绝时引导到系统设置页
+            // Toasts are invisible on AAOS head units, so use a dialog; guide to system settings when permanently denied
             val permanent = permissionRequestedOnce &&
                 denied.any { !shouldShowRequestPermissionRationale(it) }
             permissionRequestedOnce = true
@@ -80,7 +81,7 @@ abstract class AAudioTestFragment : Fragment() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // engine 绑定 Fragment 生命周期：view 重建不换实例，原生全局态无新旧实例交叠
+        // The engine is bound to the Fragment lifecycle: view recreation doesn't swap instances, so native global state never overlaps between old/new instances
         engine = createEngine(requireActivity().applicationContext, engineExecutor)
         engine.setListener(object : AAudioEngine.Listener {
             override fun onStarted() {
@@ -96,8 +97,8 @@ abstract class AAudioTestFragment : Fragment() {
                 }
             }
             override fun onError(error: String) {
-                // 错误后主动清理残留资源（ERROR 态 stop 可进入：关流、join 线程、回填 WAV 头）；
-                // 会话仍健康时（如 "Already active" 提示）不清理
+                // Actively clean up leftover resources after an error (stop can be entered from ERROR state: close stream, join threads, backfill WAV header);
+                // skip cleanup while the session is still healthy (e.g. "Already active" notice)
                 if (!engine.isActive()) engineExecutor.execute { engine.stop() }
                 activity?.runOnUiThread {
                     if (!isAdded) return@runOnUiThread
@@ -141,7 +142,7 @@ abstract class AAudioTestFragment : Fragment() {
             return
         }
         statusText.text = messages.preparing
-        startButton.isEnabled = false  // 防双击；按钮状态由 onStarted/onError 回调恢复
+        startButton.isEnabled = false  // prevent double-taps; button state is restored by onStarted/onError callbacks
         engineExecutor.execute { engine.start() }
     }
 
@@ -160,7 +161,7 @@ abstract class AAudioTestFragment : Fragment() {
     }
 
     private fun reloadConfigurations() {
-        // 按选中位置恢复而非 description：description 可能重复（自定义配置），位置与 UI 选中态天然一致
+        // Restore by selected position rather than description: descriptions may repeat (custom configs), and position matches the UI selection state naturally
         val prevPosition = configSpinner.selectedItemPosition
         availableConfigs = AAudioConfig.loadConfigs(requireContext(), section)
         if (availableConfigs.isNotEmpty()) {
@@ -184,7 +185,7 @@ abstract class AAudioTestFragment : Fragment() {
         configSpinner.adapter = adapter
 
         currentConfig?.let { config ->
-            // 直接定位对象位置：避免 description 重复时 indexOfFirst 歧义
+            // Locate by object position directly: avoids indexOfFirst ambiguity when descriptions repeat
             val index = availableConfigs.indexOf(config)
             if (index >= 0) configSpinner.setSelection(index)
         }
@@ -192,8 +193,8 @@ abstract class AAudioTestFragment : Fragment() {
         configSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val selected = availableConfigs[position]
-                // 程序性恢复（load/reload 的 setSelection）时 currentConfig 已设为同一配置 → 相等即忽略；
-                // 用户真实切换必然选中不同配置（选相同位置 Spinner 不会回调），无需额外标志位
+                // During programmatic restore (setSelection in load/reload), currentConfig is already the same config → equal means ignore;
+                // a real user switch always selects a different config (selecting the same position doesn't fire the callback), so no extra flag is needed
                 if (selected == currentConfig) return
                 currentConfig = selected
                 engineExecutor.execute { engine.setAudioConfig(selected) }
@@ -232,7 +233,7 @@ abstract class AAudioTestFragment : Fragment() {
         Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show()
     }
 
-    /** 打开本应用的系统设置页（权限被永久拒绝时的引导） */
+    /** Opens this app's system settings page (guidance when permission is permanently denied) */
     private fun openAppSettings() {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
             .setData("package:${requireContext().packageName}".toUri())
@@ -246,9 +247,9 @@ abstract class AAudioTestFragment : Fragment() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // FIFO：排在未完成的 stop 之后，原生资源（GlobalRef 等）最终释放；
-        // release 收尾后自行 shutdown——期间到达的异步回调（onError/focus loss）仍被接受
-        // 并安全执行，不会被 RejectedExecutionException 打断（release 后的 stop 均为 no-op）
+        // FIFO: queued after any in-flight stop, native resources (GlobalRef etc.) are eventually released;
+        // release shuts down the executor itself when done — async callbacks arriving meanwhile (onError/focus loss) are still
+        // accepted and safely executed, not interrupted by RejectedExecutionException (stop after release is a no-op)
         engineExecutor.execute {
             try {
                 engine.release()
@@ -259,7 +260,7 @@ abstract class AAudioTestFragment : Fragment() {
     }
 }
 
-/** 各特性的状态文案。 */
+/** Status strings for each state. */
 data class AAudioMessages(
     val ready: String,
     val preparing: String,

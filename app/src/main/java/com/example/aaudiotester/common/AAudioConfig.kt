@@ -8,23 +8,23 @@ import java.io.InputStream
 import javax.xml.parsers.DocumentBuilderFactory
 
 /**
- * AAudio 播放/录音联合配置（字段超集）。各引擎解释自己使用的字段。
+ * Combined AAudio playback/recording config (field superset). Each engine interprets the fields it uses.
  */
 data class AAudioConfig(
-    val usage: String = "AAUDIO_USAGE_MEDIA",                       // 播放域
+    val usage: String = "AAUDIO_USAGE_MEDIA",                       // playback domain
     val contentType: String = "AAUDIO_CONTENT_TYPE_MUSIC",
-    val inputPreset: String = "AAUDIO_INPUT_PRESET_GENERIC",        // 录音域
+    val inputPreset: String = "AAUDIO_INPUT_PRESET_GENERIC",        // recording domain
     val sampleRate: Int = 48000,
     val channelCount: Int = 1,
-    val format: Int = 16,                                            // 位深 16/24/32
-    val performanceMode: String = "AAUDIO_PERFORMANCE_MODE_LOW_LATENCY",  // 公共
+    val format: Int = 16,                                            // bit depth 16/24/32
+    val performanceMode: String = "AAUDIO_PERFORMANCE_MODE_LOW_LATENCY",  // common
     val sharingMode: String = "AAUDIO_SHARING_MODE_SHARED",
-    val audioFilePath: String = "",                                  // 空值由引擎解释
+    val audioFilePath: String = "",                                  // empty value is interpreted by the engine
     val description: String = "Default Configuration",
 ) {
     companion object {
         private const val TAG = "AAudioConfig"
-        /** 单一默认值来源：data class 默认值、parseConfigs 回退、getDefaultConfigs 均以此为基准 */
+        /** Single source of defaults: data class defaults, parseConfigs fallbacks, and getDefaultConfigs are all based on this */
         private val DEFAULT = AAudioConfig()
 
         fun loadConfigs(context: Context, section: String): List<AAudioConfig> = try {
@@ -36,13 +36,13 @@ data class AAudioConfig(
             getDefaultConfigs(section)
         }
 
-        /** 内部 seam，便于 JVM 单测。section 缺失 → 兜底默认；空 section → 空列表 */
+        /** Internal seam for JVM unit tests. Missing section → fallback defaults; empty section → empty list */
         internal fun parseConfigs(xml: InputStream, section: String): List<AAudioConfig> {
             val sectionElement = DocumentBuilderFactory.newInstance().newDocumentBuilder()
                 .parse(xml).documentElement.getElementsByTagName(section).item(0) as? Element?
                 ?: return getDefaultConfigs(section)
             val entries = sectionElement.getElementsByTagName("config")
-            // 单条坏配置只跳过该条，不拖垮整个 section 回退 emergency
+            // A single bad config entry is skipped without dragging the whole section back to the emergency fallback
             return (0 until entries.length).mapNotNull { i ->
                 runCatching {
                     val c = entries.item(i) as Element
@@ -68,7 +68,7 @@ data class AAudioConfig(
             Log.w(TAG, "Using hardcoded emergency configuration for $section")
             return listOf(
                 if (section == "player") {
-                    // 其余字段与 data class 默认值相同，只写差异字段
+                    // Remaining fields equal the data class defaults; only write the differing ones
                     AAudioConfig(
                         audioFilePath = AAudioConstants.DEFAULT_ASSET,
                         description = "Emergency Fallback - Media Playback"
@@ -82,7 +82,7 @@ data class AAudioConfig(
 }
 
 /**
- * XML 配置流加载器：外部路径优先，否则读 assets（XML 原生支持注释，无需预处理）。
+ * XML config stream loader: external path takes precedence, otherwise reads from assets (XML natively supports comments, no preprocessing needed).
  */
 object ConfigLoader {
 
@@ -96,7 +96,7 @@ object ConfigLoader {
     }
 }
 
-/** 子元素文本读取：元素缺失 → 默认值 */
+/** Reads child element text: missing element → default value */
 private fun Element.childText(name: String, default: String): String =
     getElementsByTagName(name).item(0)?.textContent?.trim() ?: default
 

@@ -11,13 +11,13 @@ import com.example.aaudiotester.common.AAudioEngine
 import com.example.aaudiotester.common.AssetExtractor
 import java.util.concurrent.Executor
 
-/** 播放引擎：AAudio 输出 + 音频焦点管理。 */
+/** Playback engine: AAudio output + audio focus management. */
 class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAudioEngine {
 
     companion object {
         private const val TAG = "AAudioPlayer"
         init {
-            // 加载失败时立即抛 UnsatisfiedLinkError（崩溃点即原因点），不吞错推迟到 external 调用处
+            // Fail fast with UnsatisfiedLinkError at load time (crash point == cause point); don't swallow errors and defer to external call sites
             System.loadLibrary("aaudiotester")
         }
     }
@@ -34,10 +34,10 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
     private var state = State.IDLE
 
     @Volatile
-    private var errored = false  // 本会话已上报错误：迟到的 started 一律忽略（错误优先、终态）
+    private var errored = false  // This session already reported an error: late started callbacks are ignored (error-first, terminal)
 
     @Volatile
-    private var nativeBound = false  // initializeNative 在旋转重建时可能因旧会话未停而失败，start 时重试
+    private var nativeBound = false  // initializeNative may fail on rotation rebuild if the old session hasn't stopped; retried at start
 
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
@@ -45,7 +45,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 Log.d(TAG, "Audio focus lost, stopping playback")
-                // 焦点回调在主线程：经 executor 与其他 native 调用串行，避免并发进入 stopNativePlayback
+                // Focus callbacks arrive on the main thread: serialized with other native calls via the executor to avoid concurrent entry into stopNativePlayback
                 nativeExecutor.execute { stop() }
             }
         }
@@ -55,7 +55,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
         nativeBound = initializeNative()
     }
 
-    /** 绑定可重试：旋转重建时旧会话未停会导致初次绑定失败，start 时补绑（native 幂等，重复调用安全） */
+    /** Binding is retryable: on rotation rebuild an unstopped old session can fail the first bind; rebind at start (native is idempotent, repeated calls are safe) */
     private fun ensureNativeBound(): Boolean {
         if (!nativeBound) nativeBound = initializeNative()
         return nativeBound
@@ -67,7 +67,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
             AssetExtractor.resolveAssetPath(appContext, path)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to resolve asset path: $path", e)
-            path  // 回退原始路径，让 native 报 [FILE] 错误走正常错误路径
+            path  // fall back to the raw path so native reports a [FILE] error through the normal error path
         }
     }
 
@@ -103,7 +103,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
             return false
         }
         if (state == State.ERROR) state = State.IDLE
-        errored = false  // 新会话复位
+        errored = false  // reset for a new session
 
         val audioPath = resolveCurrentPath()
         if (audioPath.isBlank() || !audioPath.lowercase().endsWith(".wav")) {
@@ -125,7 +125,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
     }
 
     override fun stop() {
-        // ERROR 态也进入：清理错误残留的流/文件/读线程（由 Fragment.onError 触发）
+        // Also entered from ERROR state: cleans up the stream/file/reader thread left by an error (triggered by Fragment.onError)
         if (state == State.IDLE) return
         Log.d(TAG, "Stopping playback")
         stopNativePlayback()
@@ -147,8 +147,8 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
     }
 
     private fun requestAudioFocus(): Boolean {
-        // AAOS 系统 usage（>=1000）AudioAttributes 无法表示（@hide，setUsage 会抛 IllegalArgumentException），
-        // 且系统 usage 属车辆关键音频、不依赖普通焦点管理，故跳过焦点请求。
+        // AAOS system usages (>=1000) cannot be represented by AudioAttributes (@hide; setUsage throws IllegalArgumentException),
+        // and system usages are vehicle-critical audio that doesn't rely on normal focus management, so skip the focus request.
         if (AAudioConstants.getUsage(currentConfig.usage) >= 1000) return true
 
         val audioAttributes = AudioAttributes.Builder()
@@ -191,10 +191,10 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
     private external fun stopNativePlayback(): Boolean
     private external fun releaseNative()
 
-    // 原生层回调
+    // Native layer callbacks
     @Suppress("unused")
     private fun onNativePlaybackStarted() {
-        if (errored) return  // 错误优先：native 已停止，忽略竞态中迟到的 started
+        if (errored) return  // error-first: native already stopped, ignore a started arriving late in a race
         state = State.PLAYING
         listener?.onStarted()
         Log.i(TAG, "Playback started successfully")
@@ -210,7 +210,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
 
     @Suppress("unused")
     private fun onNativePlaybackError(error: String) {
-        errored = true  // 会话内错误终态
+        errored = true  // terminal error state for this session
         state = State.ERROR
         abandonAudioFocus()
         listener?.onError(error)

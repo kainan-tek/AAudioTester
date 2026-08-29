@@ -9,7 +9,7 @@ import java.io.File
 class AAudioConfigTest {
 
     private val xml = """
-        <!-- 播放/录音配置（XML 原生注释） -->
+        <!-- Playback/recording config (native XML comment) -->
         <aaudioConfigs>
           <player>
             <config>
@@ -41,7 +41,7 @@ class AAudioConfigTest {
         assertEquals("AAUDIO_USAGE_MEDIA", c.usage)
         assertEquals("AAUDIO_CONTENT_TYPE_MUSIC", c.contentType)
         assertEquals("asset://sample/48k_2ch_16bit.wav", c.audioFilePath)
-        // 录音域字段走默认
+        // Recording-domain fields fall back to defaults
         assertEquals(1, c.channelCount)
         assertEquals("AAUDIO_INPUT_PRESET_GENERIC", c.inputPreset)
     }
@@ -91,7 +91,7 @@ class AAudioConfigTest {
         )
         val c = configs[0]
         assertEquals("AAUDIO_USAGE_GAME", c.usage)
-        assertEquals("AAUDIO_CONTENT_TYPE_MUSIC", c.contentType)  // 省略 → 默认
+        assertEquals("AAUDIO_CONTENT_TYPE_MUSIC", c.contentType)  // omitted → default
         assertEquals(48000, c.sampleRate)
         assertEquals("Custom Configuration", c.description)
     }
@@ -107,13 +107,13 @@ class AAudioConfigTest {
 
     @Test(expected = Exception::class)
     fun parseConfigs_malformedXml_throws_forLoadConfigsFallback() {
-        // 解析异常由 loadConfigs 的 catch 兜底为 emergency 默认（此处验证契约：确实抛出）
+        // Parse exceptions are caught by loadConfigs and fall back to emergency defaults (this verifies the contract: it does throw)
         AAudioConfig.parseConfigs(stream("not xml"), "player")
     }
 
     @Test
     fun realAssetsFile_parsesBothSections() {
-        // 直接解析源码树中的真实资产，防 XML 笔误只在上设备后才暴露
+        // Parse the real asset from the source tree directly, so XML typos surface before hitting a device
         val file = File("src/main/assets/aaudio_configs.xml")
         val player = file.inputStream().use { AAudioConfig.parseConfigs(it, "player") }
         val recorder = file.inputStream().use { AAudioConfig.parseConfigs(it, "recorder") }

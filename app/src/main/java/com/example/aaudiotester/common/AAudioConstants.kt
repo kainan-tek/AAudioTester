@@ -3,36 +3,36 @@ package com.example.aaudiotester.common
 import android.media.AudioAttributes
 
 /**
- * 合并后的 AAudio 常量（播放域 + 录音域）。
+ * Unified AAudio constants (playback domain + recording domain).
  */
 object AAudioConstants {
 
-    // 配置文件
+    // Config file
     const val CONFIG_FILE_PATH = "/data/aaudio_configs.xml"
     const val ASSETS_CONFIG_FILE = "aaudio_configs.xml"
 
-    // 内置音源
+    // Built-in audio source
     const val DEFAULT_ASSET = "asset://sample/48k_2ch_16bit.wav"
 
-    // 位深
+    // Bit depths
     const val FORMAT_16_BIT = 16
     const val FORMAT_24_BIT = 24
     const val FORMAT_32_BIT = 32
 
-    // 校验范围
+    // Validation ranges
     const val MIN_SAMPLE_RATE = 8000
     const val MAX_SAMPLE_RATE = 192000
     const val MIN_CHANNEL_COUNT = 1
     const val MAX_CHANNEL_COUNT = 16
 
-    /** 错误类型前缀（FILE 仅用于 native 层）。 */
+    /** Error type prefixes (FILE is only used by the native layer). */
     object ErrorTypes {
         const val PARAM = "[PARAM]"
         const val FOCUS = "[FOCUS]"
         const val STREAM = "[STREAM]"
     }
 
-    /** AAudio 原生常量（与 NDK 定义一致）。 */
+    /** Native AAudio constants (matching NDK definitions). */
     object AAudio {
         const val PERFORMANCE_MODE_NONE = 10
         const val PERFORMANCE_MODE_POWER_SAVING = 11
@@ -69,8 +69,8 @@ object AAudioConstants {
             "AAUDIO_USAGE_ASSISTANCE_SONIFICATION" to AudioAttributes.USAGE_ASSISTANCE_SONIFICATION,
             "AAUDIO_USAGE_GAME" to AudioAttributes.USAGE_GAME,
             "AAUDIO_USAGE_ASSISTANT" to AudioAttributes.USAGE_ASSISTANT,
-            // AAOS（对齐 NDK 的 AAUDIO_SYSTEM_USAGE_*，需 MODIFY_AUDIO_ROUTING 特权）
-            // 注：AudioAttributes.USAGE_EMERGENCY 等为 @hide 常量（SDK 不可见），故用字面量 1000-1003
+            // AAOS (mirrors the NDK AAUDIO_SYSTEM_USAGE_*, requires MODIFY_AUDIO_ROUTING privilege)
+            // Note: AudioAttributes.USAGE_EMERGENCY etc. are @hide constants (invisible to the SDK), hence literals 1000-1003
             "AAUDIO_SYSTEM_USAGE_EMERGENCY" to 1000,
             "AAUDIO_SYSTEM_USAGE_SAFETY" to 1001,
             "AAUDIO_SYSTEM_USAGE_VEHICLE_STATUS" to 1002,
@@ -142,7 +142,7 @@ object AAudioConstants {
         SharingMode.MAP, sharingMode, AAudio.SHARING_MODE_SHARED, "SharingMode"
     )
 
-    /** 位深 → native AAudio 格式；合法位深集合同源（isValidFormat 派生自它） */
+    /** Bit depth → native AAudio format; the set of valid bit depths shares this source (isValidFormat derives from it) */
     private val FORMAT_BY_BIT_DEPTH = mapOf(
         FORMAT_16_BIT to AAudio.FORMAT_PCM_I16,
         FORMAT_24_BIT to AAudio.FORMAT_PCM_I24_PACKED,
