@@ -9,3 +9,4 @@ local.properties
 .cxx/
 gradle/gradle-daemon-jvm.properties
 .kotlin/
+.workbuddy/
