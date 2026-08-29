@@ -24,7 +24,7 @@ Top tabs switch between **Playback** / **Recording**; the two features are mutua
 ## Requirements
 
 - Device: Android 12L (API 32)+; an AAOS head unit or AAOS emulator is recommended
-- Build: JDK 21 + Android SDK (compileSdk 36) + NDK; adjust `org.gradle.java.home` in `gradle.properties` or set `JAVA_HOME` when building elsewhere
+- Build: JDK 21 + Android SDK (compileSdk 37) + NDK; adjust `org.gradle.java.home` in `gradle.properties` or set `JAVA_HOME` when building elsewhere
 - AAOS system usages and the low-latency (exclusive / MMAP) path depend on the device audio framework
 
 ## Quick Start

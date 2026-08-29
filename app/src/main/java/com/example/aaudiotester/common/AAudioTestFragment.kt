@@ -46,7 +46,6 @@ abstract class AAudioTestFragment : Fragment() {
 
     private var availableConfigs: List<AAudioConfig> = emptyList()
     private var currentConfig: AAudioConfig? = null
-    private var spinnerInitialized = false
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -141,13 +140,12 @@ abstract class AAudioTestFragment : Fragment() {
     }
 
     private fun reloadConfigurations() {
-        val prevDesc = currentConfig?.description
+        // 按选中位置恢复而非 description：description 可能重复（自定义配置），位置与 UI 选中态天然一致
+        val prevPosition = configSpinner.selectedItemPosition
         availableConfigs = AAudioConfig.loadConfigs(requireContext(), section)
         if (availableConfigs.isNotEmpty()) {
-            currentConfig = prevDesc?.let { d -> availableConfigs.find { it.description == d } }
-                ?: availableConfigs[0]
+            currentConfig = availableConfigs.getOrNull(prevPosition) ?: availableConfigs[0]
             engineExecutor.execute { engine.setAudioConfig(currentConfig!!) }
-            spinnerInitialized = false
             setupSpinner()
             updateInfo()
             toast("Configuration reloaded successfully")
@@ -165,18 +163,18 @@ abstract class AAudioTestFragment : Fragment() {
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         configSpinner.adapter = adapter
 
-        currentConfig?.let {
-            val index = availableConfigs.indexOfFirst { c -> c.description == it.description }
+        currentConfig?.let { config ->
+            // 直接定位对象位置：避免 description 重复时 indexOfFirst 歧义
+            val index = availableConfigs.indexOf(config)
             if (index >= 0) configSpinner.setSelection(index)
         }
 
         configSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (!spinnerInitialized) {
-                    spinnerInitialized = true
-                    return
-                }
                 val selected = availableConfigs[position]
+                // 程序性恢复（load/reload 的 setSelection）时 currentConfig 已设为同一配置 → 相等即忽略；
+                // 用户真实切换必然选中不同配置（选相同位置 Spinner 不会回调），无需额外标志位
+                if (selected == currentConfig) return
                 currentConfig = selected
                 engineExecutor.execute { engine.setAudioConfig(selected) }
                 updateInfo()
@@ -221,9 +219,16 @@ abstract class AAudioTestFragment : Fragment() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // FIFO：排在未完成的 stop 之后，原生资源（GlobalRef 等）最终释放
-        engineExecutor.execute { engine.release() }
-        engineExecutor.shutdown()
+        // FIFO：排在未完成的 stop 之后，原生资源（GlobalRef 等）最终释放；
+        // release 收尾后自行 shutdown——期间到达的异步回调（onError/focus loss）仍被接受
+        // 并安全执行，不会被 RejectedExecutionException 打断（release 后的 stop 均为 no-op）
+        engineExecutor.execute {
+            try {
+                engine.release()
+            } finally {
+                engineExecutor.shutdown()
+            }
+        }
     }
 }
 

@@ -29,8 +29,17 @@ class AAudioRecorder(context: Context) : AAudioEngine {
     @Volatile
     private var errored = false  // 本会话已上报错误：迟到的 started 一律忽略（错误优先、终态）
 
+    @Volatile
+    private var nativeBound = false  // initializeNative 在旋转重建时可能因旧会话未停而失败，start 时重试
+
     init {
-        initializeNative()
+        nativeBound = initializeNative()
+    }
+
+    /** 绑定可重试：旋转重建时旧会话未停会导致初次绑定失败，start 时补绑（native 幂等，重复调用安全） */
+    private fun ensureNativeBound(): Boolean {
+        if (!nativeBound) nativeBound = initializeNative()
+        return nativeBound
     }
 
     override fun setListener(listener: AAudioEngine.Listener?) {
@@ -57,6 +66,12 @@ class AAudioRecorder(context: Context) : AAudioEngine {
     }
 
     override fun start(): Boolean {
+        if (!ensureNativeBound()) {
+            val error = "${AAudioConstants.ErrorTypes.STREAM} Native initialization failed"
+            Log.e(TAG, error)
+            listener?.onError(error)
+            return false
+        }
         if (state == State.RECORDING) {
             Log.w(TAG, "Already recording")
             listener?.onError("Already recording")

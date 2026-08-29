@@ -25,10 +25,11 @@ object AAudioConstants {
     const val MIN_CHANNEL_COUNT = 1
     const val MAX_CHANNEL_COUNT = 16
 
-    /** 错误类型前缀（FILE/STREAM 仅用于 native 层）。 */
+    /** 错误类型前缀（FILE 仅用于 native 层）。 */
     object ErrorTypes {
         const val PARAM = "[PARAM]"
         const val FOCUS = "[FOCUS]"
+        const val STREAM = "[STREAM]"
     }
 
     /** AAudio 原生常量（与 NDK 定义一致）。 */

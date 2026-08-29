@@ -24,7 +24,7 @@
 ## 环境要求
 
 - 设备：Android 12L（API 32）及以上；推荐 AAOS 车机或 AAOS 模拟器
-- 构建：JDK 21 + Android SDK（compileSdk 36）、NDK；换机构建需调整 `gradle.properties` 的 `org.gradle.java.home` 或设 `JAVA_HOME`
+- 构建：JDK 21 + Android SDK（compileSdk 37）、NDK；换机构建需调整 `gradle.properties` 的 `org.gradle.java.home` 或设 `JAVA_HOME`
 - AAOS 系统 usage 与低延迟（独占/MMAP）路径依赖设备音频框架支持
 
 ## 快速开始

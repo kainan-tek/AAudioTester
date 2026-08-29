@@ -82,8 +82,11 @@ static void notifyRecordingStopped() {
 }
 
 static void notifyRecordingError(const std::string &error) {
-    // 统一置位：错误已通知 Java，后续 stopNativeRecording 不再补发 onStopped 覆盖错误提示
-    g_recorder.callback_notified.store(true, std::memory_order_release);
+    // 原子判重：rt_error 路径与 errorCallback 可能并发投递，只通知一次；
+    // 已置位（stopped/error）则忽略，后续 stopNativeRecording 也不补发 onStopped 覆盖错误提示
+    if (g_recorder.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
     aaudio_common::notifyErrorToJava(g_recorder.jvm, g_recorder.recorder_instance,
                                      g_recorder.on_recording_error_method, error, "recording error");
 }
@@ -466,17 +469,17 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_releaseNative(JNIEnv *env,
     }
 
     // 所有权守卫 + 互斥：仅删除当前仍指向本实例的全局引用——旋转/重建时旧实例延迟排队的
-    // release（旧 executor 线程）与 initializeNative（主线程）经 jniBindMutex 互斥，杜绝二次释放
+    // release（旧 executor 线程）与 initializeNative（主线程）经 jniBindMutex 互斥，杜绝二次释放。
+    // method ID 只在真正释放本实例时清空：若引用已被新实例替换，method ID 归新实例所有。
     std::lock_guard<std::mutex> lock(aaudio_common::jniBindMutex());
     if (g_recorder.recorder_instance &&
         env->IsSameObject(thiz, g_recorder.recorder_instance)) {
         env->DeleteGlobalRef(g_recorder.recorder_instance);
         g_recorder.recorder_instance = nullptr;
+        g_recorder.on_recording_started_method = nullptr;
+        g_recorder.on_recording_stopped_method = nullptr;
+        g_recorder.on_recording_error_method = nullptr;
     }
-
-    g_recorder.on_recording_started_method = nullptr;
-    g_recorder.on_recording_stopped_method = nullptr;
-    g_recorder.on_recording_error_method = nullptr;
 
     LOGI("AAudioRecorder released");
 }

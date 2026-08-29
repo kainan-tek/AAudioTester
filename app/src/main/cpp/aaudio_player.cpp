@@ -132,8 +132,11 @@ static void notifyPlaybackStopped() {
 }
 
 static void notifyPlaybackError(const std::string& error) {
-    // 统一置位：错误已通知 Java，后续 stopNativePlayback 不再补发 onStopped 覆盖错误提示
-    g_player.callback_notified.store(true, std::memory_order_release);
+    // 原子判重：rt_error 路径与 errorCallback 可能并发投递，只通知一次；
+    // 已置位（stopped/error）则忽略，后续 stopNativePlayback 也不补发 onStopped 覆盖错误提示
+    if (g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
     aaudio_common::notifyErrorToJava(g_player.jvm, g_player.player_instance, g_player.on_playback_error_method,
                                      error, "playback error");
 }
@@ -185,6 +188,9 @@ static void playReadThread() {
             } else if (!g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
                 notifyPlaybackStopped();
             }
+            // EOF 播放结束：主动关流释放硬件 session（start/release 的 reset 兜底幂等；
+            // executor 侧对 stream 的操作均在 join 读线程之后，故无并发 reset）
+            if (g_player.stream) g_player.stream.reset();
             return;
         }
         size_t off = 0;
@@ -532,16 +538,16 @@ JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_release
     }
 
     // 所有权守卫 + 互斥：仅删除当前仍指向本实例的全局引用——旋转/重建时旧实例延迟排队的
-    // release（旧 executor 线程）与 initializeNative（主线程）经 jniBindMutex 互斥，杜绝二次释放
+    // release（旧 executor 线程）与 initializeNative（主线程）经 jniBindMutex 互斥，杜绝二次释放。
+    // method ID 只在真正释放本实例时清空：若引用已被新实例替换，method ID 归新实例所有。
     std::lock_guard<std::mutex> lock(aaudio_common::jniBindMutex());
     if (g_player.player_instance && env->IsSameObject(thiz, g_player.player_instance)) {
         env->DeleteGlobalRef(g_player.player_instance);
         g_player.player_instance = nullptr;
+        g_player.on_playback_started_method = nullptr;
+        g_player.on_playback_stopped_method = nullptr;
+        g_player.on_playback_error_method = nullptr;
     }
-
-    g_player.on_playback_started_method = nullptr;
-    g_player.on_playback_stopped_method = nullptr;
-    g_player.on_playback_error_method = nullptr;
 
     LOGI("AAudioPlayer released");
 }
