@@ -61,6 +61,10 @@ bool WavFile::openRead(const std::string& filePath) {
         in_.seekg(data_start);
         LOGW("Streaming WAV (declared data size unknown), using actual size: %zu bytes", remaining_data_);
     }
+    // Drop a partial trailing frame (data size not a frame multiple in malformed files):
+    // the callback consumes whole frames, so a half frame would play as one corrupt block.
+    const size_t frame_bytes = header_.num_channels * (header_.bits_per_sample / 8);
+    remaining_data_ -= remaining_data_ % frame_bytes;
     read_error_ = false;
     is_open_ = true;
     LOGI("WAV file opened: %s, %s", filePath.c_str(), getFormatInfo().c_str());
