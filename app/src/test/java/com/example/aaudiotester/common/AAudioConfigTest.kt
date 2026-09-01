@@ -54,7 +54,7 @@ class AAudioConfigTest {
         assertEquals("AAUDIO_INPUT_PRESET_CAMCORDER", c.inputPreset)
         assertEquals(44100, c.sampleRate)
         assertEquals(2, c.channelCount)
-        assertEquals(24, c.format)
+        assertEquals(24, c.bitDepth)
     }
 
     @Test

@@ -19,6 +19,8 @@ namespace {
 
 // WAVE_FORMAT_EXTENSIBLE: the real format is in the 2 bytes before the subformat GUID in the fmt chunk (offset 24)
 constexpr uint16_t kWaveFormatExtensible = 0xFFFE;
+// Streaming-writer placeholder for "unknown" data size (they can't seek back to fill it)
+constexpr uint32_t kUnknownDataSize = 0xFFFFFFFF;
 
 }  // namespace
 
@@ -51,6 +53,14 @@ bool WavFile::openRead(const std::string& filePath) {
     }
 
     remaining_data_ = header_.subchunk2_size;
+    if (remaining_data_ == kUnknownDataSize) {
+        // Trust the actual file length; files with honest-but-truncated headers still error at EOF.
+        const auto data_start = in_.tellg();
+        in_.seekg(0, std::ios::end);
+        remaining_data_ = static_cast<size_t>(in_.tellg() - data_start);
+        in_.seekg(data_start);
+        LOGW("Streaming WAV (declared data size unknown), using actual size: %zu bytes", remaining_data_);
+    }
     read_error_ = false;
     is_open_ = true;
     LOGI("WAV file opened: %s, %s", filePath.c_str(), getFormatInfo().c_str());
@@ -105,8 +115,11 @@ bool WavFile::openWrite(const std::string& filePath, int32_t sampleRate,
 }
 
 bool WavFile::writeData(const void* data, size_t size) {
-    if (!is_open_ || !data || size == 0) {
+    if (!is_open_ || !data) {
         return false;
+    }
+    if (size == 0) {
+        return true;  // zero-size write is a no-op, not a failure
     }
     // 4GB is the limit of the WAV 32-bit size field; must check before writing — checking after would mean the last block is already on disk and data_size_ has wrapped
     if (static_cast<uint64_t>(data_size_) + size > std::numeric_limits<uint32_t>::max()) {

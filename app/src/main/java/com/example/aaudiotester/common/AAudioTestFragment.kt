@@ -23,6 +23,7 @@ import androidx.fragment.app.Fragment
 import com.example.aaudiotester.R
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * Abstract base class: shares all UI wiring (status/buttons/Spinner/info area/permissions/exclusivity).
@@ -99,7 +100,13 @@ abstract class AAudioTestFragment : Fragment() {
             override fun onError(error: String) {
                 // Actively clean up leftover resources after an error (stop can be entered from ERROR state: close stream, join threads, backfill WAV header);
                 // skip cleanup while the session is still healthy (e.g. "Already active" notice)
-                if (!engine.isActive()) engineExecutor.execute { engine.stop() }
+                if (!engine.isActive()) {
+                    try {
+                        engineExecutor.execute { engine.stop() }
+                    } catch (_: RejectedExecutionException) {
+                        // Lost the race with onDestroy's shutdown: release() already did everything stop() would
+                    }
+                }
                 activity?.runOnUiThread {
                     if (!isAdded) return@runOnUiThread
                     updateButtons(false); showError(error)

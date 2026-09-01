@@ -10,6 +10,7 @@ import com.example.aaudiotester.common.AAudioConstants
 import com.example.aaudiotester.common.AAudioEngine
 import com.example.aaudiotester.common.AssetExtractor
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 
 /** Playback engine: AAudio output + audio focus management. */
 class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAudioEngine {
@@ -46,7 +47,11 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 Log.d(TAG, "Audio focus lost, stopping playback")
                 // Focus callbacks arrive on the main thread: serialized with other native calls via the executor to avoid concurrent entry into stopNativePlayback
-                nativeExecutor.execute { stop() }
+                try {
+                    nativeExecutor.execute { stop() }
+                } catch (_: RejectedExecutionException) {
+                    // Lost the race with onDestroy's shutdown: release() already abandoned focus and stopped
+                }
             }
         }
     }

@@ -16,7 +16,7 @@ data class AAudioConfig(
     val inputPreset: String = "AAUDIO_INPUT_PRESET_GENERIC",        // recording domain
     val sampleRate: Int = 48000,
     val channelCount: Int = 1,
-    val format: Int = 16,                                            // bit depth 16/24/32
+    val bitDepth: Int = 16,                                          // bit depth 16/24/32
     val performanceMode: String = "AAUDIO_PERFORMANCE_MODE_LOW_LATENCY",  // common
     val sharingMode: String = "AAUDIO_SHARING_MODE_SHARED",
     val audioFilePath: String = "",                                  // empty value is interpreted by the engine
@@ -52,7 +52,7 @@ data class AAudioConfig(
                         inputPreset = c.childText("inputPreset", DEFAULT.inputPreset),
                         sampleRate = c.childInt("sampleRate", DEFAULT.sampleRate),
                         channelCount = c.childInt("channelCount", DEFAULT.channelCount),
-                        format = c.childInt("format", DEFAULT.format),
+                        bitDepth = c.childInt("format", DEFAULT.bitDepth),
                         performanceMode = c.childText("performanceMode", DEFAULT.performanceMode),
                         sharingMode = c.childText("sharingMode", DEFAULT.sharingMode),
                         audioFilePath = c.childText("audioFilePath", DEFAULT.audioFilePath),

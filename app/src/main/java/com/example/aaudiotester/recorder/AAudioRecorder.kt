@@ -58,7 +58,7 @@ class AAudioRecorder(context: Context) : AAudioEngine {
             AAudioConstants.getInputPreset(config.inputPreset),
             config.sampleRate,
             config.channelCount,
-            AAudioConstants.getFormatFromBitDepth(config.format),
+            AAudioConstants.getFormatFromBitDepth(config.bitDepth),
             AAudioConstants.getPerformanceMode(config.performanceMode),
             AAudioConstants.getSharingMode(config.sharingMode),
             audioFilePath
@@ -92,8 +92,8 @@ class AAudioRecorder(context: Context) : AAudioEngine {
             listener?.onError(error)
             return false
         }
-        if (!AAudioConstants.isValidFormat(currentConfig.format)) {
-            val error = "${AAudioConstants.ErrorTypes.PARAM} Invalid bit depth: ${currentConfig.format}"
+        if (!AAudioConstants.isValidFormat(currentConfig.bitDepth)) {
+            val error = "${AAudioConstants.ErrorTypes.PARAM} Invalid bit depth: ${currentConfig.bitDepth}"
             Log.e(TAG, error)
             listener?.onError(error)
             return false

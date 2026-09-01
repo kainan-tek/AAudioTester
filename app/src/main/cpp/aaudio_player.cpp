@@ -75,8 +75,18 @@ namespace {
 
 AudioPlayerState g_player;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
-bool validatePlayerState() {
+// Not playing: gate for initialize/setConfig — native state must not change mid-session
+bool isPlayerIdle() {
     return !g_player.is_playing.load(std::memory_order_acquire);
+}
+
+// Chunk size for file→ring reads, rounded down to a frame multiple (24-bit frames don't divide
+// 64KB evenly) so ring contents stay frame-aligned. Caller must ensure wav_file is open.
+size_t readChunkBytes() {
+    const size_t frame_size =
+        aaudio_common::bytesPerSample(g_player.wav_file->getAAudioFormat()) *
+        static_cast<size_t>(g_player.wav_file->getChannelCount());
+    return (64 * 1024) / frame_size * frame_size;
 }
 
 }  // namespace
@@ -152,12 +162,7 @@ static void stopReadThread() {
 // Playback reader thread: keeps reading WAV data into the ring buffer; the callback thread only memcpys and never touches disk.
 // Also serves as the termination notification thread: EOF/RT error JNI notifications are delivered here (non-RT thread); the callback thread only sets flags.
 static void playReadThread() {
-    // 24-bit frame sizes (6/12...) don't divide 64KB evenly: round the buffer down to a frame multiple so ring contents stay frame-aligned
-    const size_t frame_size =
-        aaudio_common::bytesPerSample(g_player.wav_file->getAAudioFormat()) *
-        static_cast<size_t>(g_player.wav_file->getChannelCount());
-    const size_t buf_size = (64 * 1024) / frame_size * frame_size;
-    std::vector<char> buf(buf_size);
+    std::vector<char> buf(readChunkBytes());
     while (!g_player.stop_read_thread.load(std::memory_order_acquire)) {
         // Terminal error set by the RT callback: delivered here to avoid JNI on the callback thread
         if (const char* msg = g_player.rt_error_msg.load(std::memory_order_acquire)) {
@@ -374,7 +379,7 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_ini
                                                                                               jobject thiz) {
     LOGI("initializeNative");
 
-    if (!validatePlayerState()) {
+    if (!isPlayerIdle()) {
         LOGE("Cannot initialize while playing");
         return JNI_FALSE;
     }
@@ -407,7 +412,7 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_set
     JNIEnv* env, jobject thiz, jint usage, jint contentType, jint performanceMode, jint sharingMode, jstring filePath) {
     LOGI("setNativeConfig");
 
-    if (!validatePlayerState()) {
+    if (!isPlayerIdle()) {
         LOGE("Cannot change config while playing");
         return JNI_FALSE;
     }
@@ -465,6 +470,11 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
     g_player.eof_reached.store(false, std::memory_order_release);
     g_player.stop_read_thread.store(false, std::memory_order_release);
     g_player.underrun_count.store(0, std::memory_order_relaxed);
+    // Pre-fill one chunk so the first callback (it races ahead of the reader's first disk read)
+    // never hits an empty ring (underrun). Must precede thread spawn — the file position is shared.
+    std::vector<char> prefill(readChunkBytes());
+    const size_t n = g_player.wav_file->readAudioData(prefill.data(), prefill.size());
+    if (n > 0) g_player.ring->write(prefill.data(), n);
     g_player.read_thread = std::thread(playReadThread);
 
 #if LATENCY_TEST_ENABLE

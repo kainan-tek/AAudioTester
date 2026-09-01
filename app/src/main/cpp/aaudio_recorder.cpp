@@ -61,7 +61,8 @@ namespace {
 
     AudioRecorderState g_recorder;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
-    bool validateRecorderState() {
+    // Not recording: gate for initialize/setConfig — native state must not change mid-session
+    bool isRecorderIdle() {
         return !g_recorder.is_recording.load(std::memory_order_acquire);
     }
 
@@ -284,7 +285,7 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_initializeNative(JNIEnv *e
                                                                          jobject thiz) {
     LOGI("initializeNative");
 
-    if (!validateRecorderState()) {
+    if (!isRecorderIdle()) {
         LOGE("Cannot initialize while recording");
         return JNI_FALSE;
     }
@@ -329,7 +330,7 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_setNativeConfig(JNIEnv *en
                                                                         jstring audioFilePath) {
     LOGI("setNativeConfig");
 
-    if (!validateRecorderState()) {
+    if (!isRecorderIdle()) {
         LOGE("Cannot change config while recording");
         return JNI_FALSE;
     }
