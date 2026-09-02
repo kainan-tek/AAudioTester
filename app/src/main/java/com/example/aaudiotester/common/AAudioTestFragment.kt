@@ -51,10 +51,6 @@ abstract class AAudioTestFragment : Fragment() {
     private var availableConfigs: List<AAudioConfig> = emptyList()
     private var currentConfig: AAudioConfig? = null
 
-    // "Permanently denied" can only be determined after requesting at least once: on the first denial the
-    // rationale isn't showable yet, so don't mislead users to the settings page
-    private var permissionRequestedOnce = false
-
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             val denied = result.filterValues { !it }.keys
@@ -63,9 +59,10 @@ abstract class AAudioTestFragment : Fragment() {
                 return@registerForActivityResult
             }
             // Toasts are invisible on AAOS head units, so use a dialog; guide to system settings when permanently denied
-            val permanent = permissionRequestedOnce &&
-                denied.any { !shouldShowRequestPermissionRationale(it) }
-            permissionRequestedOnce = true
+            // minSdk 32 (API 30+ semantics): a denial leaves the rationale showable unless the user is
+            // permanently denied (requires two denials), so rationale==false right after a denial is
+            // the permanent-deny signal itself — no "requested at least once" state is needed
+            val permanent = denied.any { !shouldShowRequestPermissionRationale(it) }
             val builder = AlertDialog.Builder(requireContext())
                 .setTitle("Permission Required")
                 .setMessage(

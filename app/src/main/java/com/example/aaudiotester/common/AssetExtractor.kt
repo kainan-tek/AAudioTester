@@ -16,14 +16,26 @@ object AssetExtractor {
     fun assetRelativePath(path: String): String =
         if (path.startsWith(PREFIX)) path.removePrefix(PREFIX) else path
 
-    /** Reuses the extracted file if present, otherwise extracts from assets; plain paths are returned unchanged. */
+    /**
+     * Extracts an asset:// path into the app's private directory and returns a real path usable by
+     * native code. The extracted copy is reused while its size still matches the APK asset: a size
+     * mismatch catches an app update shipping a changed same-name asset (a stale test signal would
+     * silently invalidate measurements), at zero content I/O on the hot path. Plain paths unchanged.
+     * @Synchronized: callable from two fragments' executors — serialize to keep the tmp file and
+     * rename collision-free.
+     */
+    @Synchronized
     fun resolveAssetPath(context: Context, path: String): String {
         if (!path.startsWith(PREFIX)) return path
         val assetPath = assetRelativePath(path)
         val target = File(context.filesDir, assetPath)
-        if (!target.exists()) {
+        // openFd fails on compressed assets: treat as "size unknown" and re-extract (safe fallback;
+        // .wav is in aapt2's default no-compress list, so the metadata read is the normal path)
+        val assetSize = runCatching { context.assets.openFd(assetPath).use { it.length } }.getOrNull()
+        if (assetSize == null || assetSize != target.length()) {
             target.parentFile?.mkdirs()
-            // Write to a temp file first, then atomically rename: if killed midway, no truncated file is left for exists() to mistake as complete
+            // Write to a temp file first, then atomically rename: playback may be reading the target
+            // file while we replace it, and the rename swaps in the fresh copy as one indivisible step
             val tmp = File(context.filesDir, "$assetPath.tmp")
             context.assets.open(assetPath).use { input ->
                 tmp.outputStream().use { output -> input.copyTo(output) }

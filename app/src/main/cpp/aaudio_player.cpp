@@ -190,7 +190,11 @@ static void playReadThread() {
             if (const char* msg = g_player.rt_error_msg.load(std::memory_order_acquire)) {
                 g_player.rt_error_msg.store(nullptr, std::memory_order_release);
                 notifyPlaybackError(msg);
-            } else if (!g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+            } else if (g_player.ring->readable() == 0 &&
+                       !g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+                // Notify stopped only on a genuine drain. An exit via stop_read_thread with data
+                // still queued is a user stop or a failed start — notification belongs to
+                // stopNativePlayback / the start-failure path, whose error this latch would swallow.
                 notifyPlaybackStopped();
             }
             // EOF: playback ended, proactively close the stream to release the hardware session (start/release resets are idempotent fallbacks;

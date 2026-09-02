@@ -125,8 +125,9 @@ bool WavFile::writeData(const void* data, size_t size) {
     if (size == 0) {
         return true;  // zero-size write is a no-op, not a failure
     }
-    // 4GB is the limit of the WAV 32-bit size field; must check before writing — checking after would mean the last block is already on disk and data_size_ has wrapped
-    if (static_cast<uint64_t>(data_size_) + size > std::numeric_limits<uint32_t>::max()) {
+    // 4GB is the limit of the WAV 32-bit size field; must check before writing — checking after would mean the last block is already on disk and data_size_ has wrapped.
+    // Reserve 36 bytes for the header so close()'s "36 + data_size" RIFF size backfill cannot wrap either.
+    if (static_cast<uint64_t>(data_size_) + size > std::numeric_limits<uint32_t>::max() - 36) {
         LOGE("Data size exceeds 4GB WAV limit, refusing write (file finalized at limit)");
         return false;
     }
