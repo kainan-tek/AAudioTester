@@ -147,7 +147,9 @@ abstract class AAudioTestFragment : Fragment() {
             true
         }
 
-        // Buttons first: the initial zero-config load disables Start, which must not be overwritten back to enabled
+        // updateButtons is the single writer of startButton (also gated on availableConfigs):
+        // the initial pass disables everything, and loadConfigurations re-enables Start once
+        // configs exist — so a zero-config first load can be recovered by a long-press reload
         updateButtons(false)
         loadConfigurations()
         return root
@@ -192,7 +194,8 @@ abstract class AAudioTestFragment : Fragment() {
         // works, and clearing here would leave the spinner adapter populated while availableConfigs is empty (crash on next tap)
         val loaded = AAudioConfig.loadConfigs(requireContext(), section)
         if (loaded.isEmpty()) {
-            if (reload) toast("No valid configurations found") else startButton.isEnabled = false
+            if (reload) toast("No valid configurations found")
+            updateButtons(false)  // Start stays disabled via the availableConfigs gate
             statusText.text = messages.failed
             return
         }
@@ -207,6 +210,10 @@ abstract class AAudioTestFragment : Fragment() {
         onEngineThread { engine.setAudioConfig(currentConfig!!) }
         setupSpinner()
         updateInfo()
+        // Re-evaluate the buttons with configs now present: this re-enables Start both on the
+        // initial load (updateButtons ran while availableConfigs was still empty) and after a
+        // successful reload of a zero-config start (the permanent dead-end this fixes)
+        updateButtons(false)
         if (reload) toast("Configuration reloaded successfully")
         statusText.text = messages.ready
     }
@@ -239,8 +246,14 @@ abstract class AAudioTestFragment : Fragment() {
         }
     }
 
+    /**
+     * Single writer of the button/spinner enabled states. Start additionally requires a config to
+     * start: before any load succeeds it stays disabled (and a successful load/reload re-enables
+     * it by calling this with the populated availableConfigs). The one intentional exception is
+     * startInternal's busy-window direct write, restored by the engine callbacks.
+     */
     private fun updateButtons(active: Boolean) {
-        startButton.isEnabled = !active
+        startButton.isEnabled = !active && availableConfigs.isNotEmpty()
         stopButton.isEnabled = active
         configSpinner.isEnabled = !active
     }
