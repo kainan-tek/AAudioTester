@@ -96,9 +96,6 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
             currentConfig = config
         } else {
             Log.w(TAG, "Native rejected configuration, keeping previous")
-            // The UI has already switched its spinner to the new config: a silent rejection would
-            // leave it showing parameters the engine will never use — surface the mismatch
-            listener?.onError("${AAudioConstants.ErrorTypes.PARAM} Native rejected configuration")
         }
     }
 
