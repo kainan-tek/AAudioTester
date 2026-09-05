@@ -329,6 +329,10 @@ static bool createAAudioStream() {
         return false;
     }
     g_player.stream.reset(raw_stream);
+    // Clear an error left by the last session's final in-flight callback, or the new reader would
+    // consume it and kill this session. Here because the reset above is what closed the old stream
+    // and joined its in-flight callbacks — the earliest point where no stale publisher remains.
+    g_player.rt_error.clear();
 
     aaudio_common::optimizeBufferSize(g_player.stream.get(), g_player.performance_mode);
 
@@ -378,14 +382,11 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_ini
         return JNI_FALSE;
     }
 
-    // Join-before-rebind: the idle gate already passes while a leftover worker (an EOF/error path
-    // set is_playing false) is still delivering its final notification. Join it here so its JNI
-    // callbacks ran against the OLD binding — a rebind can never redirect a late notification onto
-    // the new instance. Idempotent when no worker is left.
-    stopReadThread();
-
+    // The idle gate already passes while a leftover worker (an EOF/error path set is_playing
+    // false) is still delivering its final notification — stopReadThread joins it, idempotently.
     if (!g_player.notifier.bind(env, thiz, "player",
-                                "onNativePlaybackStopped", "onNativePlaybackError")) {
+                                "onNativePlaybackStopped", "onNativePlaybackError",
+                                stopReadThread)) {
         return JNI_FALSE;
     }
 
@@ -458,8 +459,6 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
     g_player.eof_reached.store(false, std::memory_order_release);
     g_player.stop_read_thread.store(false, std::memory_order_release);
     g_player.underrun_count.store(0, std::memory_order_relaxed);
-    // Clear an error left by the last session's final in-flight callback (set after the old reader exited), or the new reader would consume it and kill this session
-    g_player.rt_error.clear();
     // Pre-fill one chunk so the first callback (it races ahead of the reader's first disk read)
     // never hits an empty ring (underrun). Must precede thread spawn — the file position is shared.
     std::vector<char> prefill(readChunkBytes());

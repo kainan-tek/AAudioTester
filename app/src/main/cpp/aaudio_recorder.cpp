@@ -240,6 +240,10 @@ static bool createAAudioStream() {
         return false;
     }
     g_recorder.stream.reset(raw_stream);
+    // Clear an error left by the last session's final in-flight callback, or the new writer would
+    // consume it and kill this session. Here because the reset above is what closed the old stream
+    // and joined its in-flight callbacks — the earliest point where no stale publisher remains.
+    g_recorder.rt_error.clear();
 
     aaudio_common::optimizeBufferSize(g_recorder.stream.get(), g_recorder.performance_mode);
 
@@ -271,13 +275,11 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_initializeNative(JNIEnv *e
         return JNI_FALSE;
     }
 
-    // Join-before-rebind: same invariant as the player's initializeNative — join a leftover
-    // writer (in its final stretch after an error path set is_recording false) before rebinding,
-    // so its late notifications always land on the instance they were created under. Idempotent.
-    stopWriteThread();
-
+    // A leftover writer (in its final stretch after an error path set is_recording false) is
+    // joined by the bind's quiesce, idempotently.
     if (!g_recorder.notifier.bind(env, thiz, "recorder",
-                                  "onNativeRecordingStopped", "onNativeRecordingError")) {
+                                  "onNativeRecordingStopped", "onNativeRecordingError",
+                                  stopWriteThread)) {
         return JNI_FALSE;
     }
 
@@ -371,11 +373,6 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
     g_recorder.ring = std::make_unique<SpScRingBuffer>(kDefaultRingCapacity);
     g_recorder.stop_write_thread.store(false, std::memory_order_release);
     g_recorder.dropped_bytes.store(0, std::memory_order_relaxed);
-    // Clear an error left by the last session's final in-flight callback, or the new writer would
-    // consume it and kill this session. Must follow createAAudioStream(): its stream.reset() is
-    // what closes the old stream and joins its callbacks (same ordering as the player's clear,
-    // which also happens after createAAudioStream has swapped in the new stream)
-    g_recorder.rt_error.clear();
     g_recorder.write_thread = std::thread(recordWriteThread);
 
     // Set recording flag before starting stream to avoid race condition with callback

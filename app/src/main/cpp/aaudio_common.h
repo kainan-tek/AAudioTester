@@ -183,9 +183,14 @@ struct JavaNotifier {
     std::atomic<bool> notified{false};  // claimed ⇔ a notice was delivered, or a stop-path delivery failed and left it claimed (both reset by the next start)
 
     // initializeNative: rebind to a fresh fragment instance (delete old global ref → new ref →
-    // method IDs). Returns false on failure with the binding fully cleared.
+    // method IDs). quiesce joins any leftover worker BEFORE the rebinding — the join-before-rebind
+    // invariant made structural: a worker's late notifications must run against the OLD binding,
+    // never be redirected onto the new instance, and the compiler now forces every caller to do it.
+    // Returns false on failure with the binding fully cleared.
     bool bind(JNIEnv* env, jobject thiz, const char* what,
-              const char* stopped_name, const char* error_name) {
+              const char* stopped_name, const char* error_name,
+              void (*quiesce)()) {
+        quiesce();
         jclass clazz = bindJavaInstance(env, thiz, instance, what);
         if (!clazz) {
             return false;
