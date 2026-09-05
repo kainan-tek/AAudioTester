@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -31,6 +32,8 @@ import java.util.concurrent.Executors
 abstract class AAudioTestFragment : Fragment() {
 
     companion object {
+        private const val TAG = "AAudioTestFragment"
+
         // One FIFO thread per section: each engine's native global is a process-wide singleton, so
         // its own old/new fragment instances must serialize on one thread — an old instance's
         // stop/release completes before the new instance's initialize/config/start. But g_player and
@@ -111,7 +114,7 @@ abstract class AAudioTestFragment : Fragment() {
                 // Actively clean up leftover resources after an error (stop can be entered from ERROR state: close stream, join threads, backfill WAV header);
                 // skip cleanup while the session is still healthy (e.g. "Already active" notice)
                 if (!engine.isActive()) {
-                    engineExecutor.execute { engine.stop() }
+                    onEngineThread { engine.stop() }
                 }
                 activity?.runOnUiThread {
                     if (!isAdded) return@runOnUiThread
@@ -138,7 +141,7 @@ abstract class AAudioTestFragment : Fragment() {
             if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
             else startInternal()
         }
-        stopButton.setOnClickListener { engineExecutor.execute { engine.stop() } }
+        stopButton.setOnClickListener { onEngineThread { engine.stop() } }
         configSpinner.setOnLongClickListener {
             loadConfigurations(reload = true)
             true
@@ -148,6 +151,27 @@ abstract class AAudioTestFragment : Fragment() {
         updateButtons(false)
         loadConfigurations()
         return root
+    }
+
+    /**
+     * Runs an engine task on the section's FIFO executor. Every Exception path inside the engines
+     * already ends in a listener callback, but a Throwable escaping the task (e.g. an Error under
+     * memory pressure) would fire no callback at all — settle the buttons and surface the failure
+     * so the UI cannot stay locked in "Preparing".
+     */
+    private fun onEngineThread(task: () -> Unit) {
+        engineExecutor.execute {
+            try {
+                task()
+            } catch (t: Throwable) {
+                Log.e(TAG, "Engine task crashed", t)
+                activity?.runOnUiThread {
+                    if (!isAdded) return@runOnUiThread
+                    updateButtons(false)
+                    showError("Internal error: ${t.javaClass.simpleName}")
+                }
+            }
+        }
     }
 
     private fun startInternal() {
@@ -160,7 +184,7 @@ abstract class AAudioTestFragment : Fragment() {
         // Lock the config too: native is busy mid-start until onStarted arrives, so a switch here
         // would be silently rejected by the engine (configSpinner stays locked in updateButtons(true))
         configSpinner.isEnabled = false
-        engineExecutor.execute { engine.start() }
+        onEngineThread { engine.start() }
     }
 
     private fun loadConfigurations(reload: Boolean = false) {
@@ -180,7 +204,7 @@ abstract class AAudioTestFragment : Fragment() {
         } else {
             availableConfigs[0]
         }
-        engineExecutor.execute { engine.setAudioConfig(currentConfig!!) }
+        onEngineThread { engine.setAudioConfig(currentConfig!!) }
         setupSpinner()
         updateInfo()
         if (reload) toast("Configuration reloaded successfully")
@@ -207,7 +231,7 @@ abstract class AAudioTestFragment : Fragment() {
                 // a real user switch always selects a different config (selecting the same position doesn't fire the callback), so no extra flag is needed
                 if (selected == currentConfig) return
                 currentConfig = selected
-                engineExecutor.execute { engine.setAudioConfig(selected) }
+                onEngineThread { engine.setAudioConfig(selected) }
                 updateInfo()
                 toast("Switched to: ${selected.description}")
             }
@@ -252,14 +276,14 @@ abstract class AAudioTestFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
-        engineExecutor.execute { engine.stop() }
+        onEngineThread { engine.stop() }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         // FIFO on the shared executor: release runs after any queued stop; the executor itself is
         // process-wide and stays alive for the next fragment instance
-        engineExecutor.execute { engine.release() }
+        onEngineThread { engine.release() }
     }
 }
 
