@@ -64,8 +64,8 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_setNativeConfig(JNIEnv *en
  * @return JNI_TRUE if recording started successfully, JNI_FALSE otherwise
  */
 JNIEXPORT jboolean JNICALL
-Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEnv *env,
-                                                                           jobject thiz);
+Java_com_example_aaudiotester_recorder_AAudioRecorder_startNative(JNIEnv *env,
+                                                                  jobject thiz);
 
 /**
  * Stop audio recording
@@ -76,8 +76,8 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
  *         completion itself
  */
 JNIEXPORT jboolean JNICALL
-Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv *env,
-                                                                          jobject thiz);
+Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNative(JNIEnv *env,
+                                                                 jobject thiz);
 
 /**
  * Release audio recorder resources

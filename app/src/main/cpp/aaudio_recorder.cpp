@@ -200,12 +200,11 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream *stream,
 static void errorCallback(AAudioStream *stream, void *userData, aaudio_result_t error) {
     LOGE("AAudio error callback: %s", AAudio_convertResultToText(error));
     g_recorder.is_recording.store(false, std::memory_order_release);
-    // Same RT discipline as the data callback: flag only, no allocation, no JNI. The message is composed into
-    // rt_error.buf (no heap) and published via rt_error.publish; the writer thread delivers to Java. After notifying,
+    // Same RT discipline as the data callback: flag only, no allocation, no JNI. The message is
+    // composed into rt_error.buf by publishf (the RT-safe composition point); the writer thread
+    // delivers to Java. After notifying,
     // Fragment.onError cleans up via stop() (close stream, join writer thread, backfill WAV header).
-    snprintf(g_recorder.rt_error.buf, sizeof(g_recorder.rt_error.buf), "[STREAM] Recording stream error: %s",
-             AAudio_convertResultToText(error));
-    g_recorder.rt_error.publish(g_recorder.rt_error.buf);
+    g_recorder.rt_error.publishf("[STREAM] Recording stream error: %s", AAudio_convertResultToText(error));
 }
 
 static bool createAAudioStream() {
@@ -239,11 +238,7 @@ static bool createAAudioStream() {
         LOGE("Failed to open recording stream: %s", AAudio_convertResultToText(result));
         return false;
     }
-    g_recorder.stream.reset(raw_stream);
-    // Clear an error left by the last session's final in-flight callback, or the new writer would
-    // consume it and kill this session. Here because the reset above is what closed the old stream
-    // and joined its in-flight callbacks — the earliest point where no stale publisher remains.
-    g_recorder.rt_error.clear();
+    aaudio_common::adoptStream(g_recorder.stream, raw_stream, g_recorder.rt_error);
 
     aaudio_common::optimizeBufferSize(g_recorder.stream.get(), g_recorder.performance_mode);
 
@@ -443,11 +438,8 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNative(JNIEnv *env,
         LOGW("Recording dropped bytes: %zu", g_recorder.dropped_bytes.load(std::memory_order_relaxed));
     }
 
-    // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set),
-    // same protocol as the player's stop path. Return-value contract: see
-    // JavaNotifier::deliverStoppedOnce — JNI_TRUE = a notice already reached Kotlin (delivered
-    // here, or the latch is owned by the error path); JNI_FALSE = our delivery failed — Kotlin
-    // self-runs the onStopped completion to recover the UI.
+    // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set).
+    // Return-value contract: see JavaNotifier::deliverStoppedOnce.
     return g_recorder.notifier.deliverStoppedOnce("recording stopped") ? JNI_TRUE : JNI_FALSE;
 }
 

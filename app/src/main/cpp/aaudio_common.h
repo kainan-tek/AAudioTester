@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdarg>
 #include <memory>
 #include <string>
 
@@ -35,7 +36,7 @@ using AAudioStreamPtr = std::unique_ptr<AAudioStream, AAudioStreamDeleter>;
 // literal, or a message composed into buf (no heap on the RT thread); the worker thread takes it
 // on a non-RT thread and delivers it to Java. errorCallback fires at most once per stream, so buf
 // has a single writer (data-callback branches publish literals only, never touching buf);
-// publish()'s release-store happens-after the buffer write, and take()'s acquire-load makes the
+// publish()'s release-store happens-after the buffer write, and take()'s acquire makes
 // buffer contents visible before the message is read.
 struct RtErrorSlot {
     std::atomic<const char*> msg{nullptr};
@@ -43,16 +44,22 @@ struct RtErrorSlot {
 
     // RT side: publish a static literal or a message written into buf
     void publish(const char* text) { msg.store(text, std::memory_order_release); }
+
+    // RT side: compose a message into buf (no heap) and publish it — the RT-safe composition
+    // point. The format attribute keeps the format string and arguments checked at compile time.
+    void publishf(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+        publish(buf);
+    }
     // Worker side: non-consuming check (loop conditions)
     bool pending() const { return msg.load(std::memory_order_acquire) != nullptr; }
-    // Worker side: take the pending message (nullptr if none), leaving the slot empty
-    const char* take() {
-        const char* m = msg.load(std::memory_order_acquire);
-        if (m) {
-            msg.store(nullptr, std::memory_order_release);
-        }
-        return m;
-    }
+    // Worker side: take the pending message (nullptr if none), leaving the slot empty. One atomic
+    // exchange: with a load-then-clear pair, a publish landing between the two steps would have
+    // its newer message silently erased by the clear.
+    const char* take() { return msg.exchange(nullptr, std::memory_order_acq_rel); }
     // Start path: drop a leftover message from the previous session's final in-flight callback
     void clear() { msg.store(nullptr, std::memory_order_release); }
 };
@@ -93,6 +100,12 @@ inline jclass bindJavaInstance(JNIEnv* env, jobject thiz, jobject& instance, con
     instance = env->NewGlobalRef(thiz);
     if (!instance) {
         AAC_LOGW("Failed to create global reference for %s", what);
+        // NewGlobalRef leaves OutOfMemoryError pending: clear it so the false return (not the
+        // exception) is the failure signal at the JNI boundary, and no further JNI call in this
+        // path runs with a pending exception
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
         return nullptr;
     }
     jclass clazz = env->GetObjectClass(thiz);
@@ -180,7 +193,7 @@ struct JavaNotifier {
     jobject instance = nullptr;
     jmethodID stopped_method = nullptr;
     jmethodID error_method = nullptr;
-    std::atomic<bool> notified{false};  // claimed ⇔ a notice was delivered, or a stop-path delivery failed and left it claimed (both reset by the next start)
+    std::atomic<bool> notified{false};  // claimed ⇔ a notice was delivered (delivery failures release the claim, so a later path can retry; the next start resets it)
 
     // initializeNative: rebind to a fresh fragment instance (delete old global ref → new ref →
     // method IDs). quiesce joins any leftover worker BEFORE the rebinding — the join-before-rebind
@@ -200,6 +213,11 @@ struct JavaNotifier {
         env->DeleteLocalRef(clazz);  // single deletion point: the local ref exists only in this scope
         if (!stopped_method || !error_method) {
             AAC_LOGW("Failed to get %s callback method IDs", what);
+            // GetMethodID leaves NoSuchMethodError pending: same contract — the false return is
+            // the failure signal; the reason is already in logcat
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
             if (instance) {
                 env->DeleteGlobalRef(instance);
                 instance = nullptr;
@@ -305,6 +323,15 @@ inline void optimizeBufferSize(AAudioStream* stream, aaudio_performance_mode_t m
                      AAudio_convertResultToText(result));
         }
     }
+}
+
+// Swap in the newly opened stream and clear the previous session's leftover terminal error. The
+// ordering IS the invariant: reset() closes the old stream and joins its in-flight callbacks —
+// the earliest point where no stale rt_error publisher remains — so the clear cannot be hoisted
+// above it (the new reader/writer would consume the stale error and kill the fresh session).
+inline void adoptStream(AAudioStreamPtr& stream, AAudioStream* raw, RtErrorSlot& rt_error) {
+    stream.reset(raw);
+    rt_error.clear();
 }
 
 // Stop the stream and wait for completion (100ms timeout); failure only logs a warning and does not block cleanup

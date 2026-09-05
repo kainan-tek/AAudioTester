@@ -38,8 +38,8 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_ini
  * @param thiz Java object instance
  * @return JNI_TRUE if playback started successfully, JNI_FALSE otherwise
  */
-JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_startNativePlayback(JNIEnv* env,
-                                                                                                 jobject thiz);
+JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_startNative(JNIEnv* env,
+                                                                                         jobject thiz);
 
 /**
  * Stop audio playback
@@ -49,8 +49,8 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
  *         owned by the error/EOF path); JNI_FALSE if delivery failed — Java must run the onStopped
  *         completion itself
  */
-JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(JNIEnv* env,
-                                                                                                jobject thiz);
+JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNative(JNIEnv* env,
+                                                                                        jobject thiz);
 
 /**
  * Release audio player resources

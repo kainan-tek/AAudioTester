@@ -172,7 +172,10 @@ static void playReadThread() {
                 // Notify stopped only on a genuine drain. An exit via stop_read_thread with data
                 // still queued is a user stop or a failed start — notification belongs to
                 // stopNative / the start-failure path, whose error this latch would swallow.
-                // No-op when the error path owns the latch (deliverStoppedOnce's claim fails).
+                // No-op when the error path owns the latch (deliverStoppedOnce's claim fails). A
+                // delivery failure here is NOT auto-recovered: the latch is released so a manual
+                // stop can still notify, but until then the UI shows active over a torn-down
+                // session (accepted: thread-attach failure is a memory-pressure edge).
                 g_player.notifier.deliverStoppedOnce("playback stopped");
             }
             if (g_player.underrun_count.load(std::memory_order_relaxed) > 0) {
@@ -278,14 +281,13 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
 static void errorCallback(AAudioStream* stream, void* userData, aaudio_result_t error) {
     LOGE("AAudio error: %s", AAudio_convertResultToText(error));
     g_player.is_playing.store(false, std::memory_order_release);
-    // Same RT discipline as the data callback: flag only, no allocation, no JNI. The message is composed into
-    // rt_error.buf (no heap) and published via rt_error.publish; the reader thread delivers to Java. After notifying,
+    // Same RT discipline as the data callback: flag only, no allocation, no JNI. The message is
+    // composed into rt_error.buf by publishf (the RT-safe composition point); the reader thread
+    // delivers to Java. After notifying,
     // Fragment.onError cleans up via stop() (close stream, join reader thread).
     // If the reader has already exited (stop path joined it), the flag stays unconsumed and the session ends as
     // onStopped instead of onError — acceptable, the session is ending anyway.
-    snprintf(g_player.rt_error.buf, sizeof(g_player.rt_error.buf), "[STREAM] Playback stream error: %s",
-             AAudio_convertResultToText(error));
-    g_player.rt_error.publish(g_player.rt_error.buf);
+    g_player.rt_error.publishf("[STREAM] Playback stream error: %s", AAudio_convertResultToText(error));
 }
 
 static bool createAAudioStream() {
@@ -328,11 +330,7 @@ static bool createAAudioStream() {
         LOGE("Failed to open stream: %s", AAudio_convertResultToText(result));
         return false;
     }
-    g_player.stream.reset(raw_stream);
-    // Clear an error left by the last session's final in-flight callback, or the new reader would
-    // consume it and kill this session. Here because the reset above is what closed the old stream
-    // and joined its in-flight callbacks — the earliest point where no stale publisher remains.
-    g_player.rt_error.clear();
+    aaudio_common::adoptStream(g_player.stream, raw_stream, g_player.rt_error);
 
     aaudio_common::optimizeBufferSize(g_player.stream.get(), g_player.performance_mode);
 
@@ -540,10 +538,8 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
     closeGpio();
 #endif
 
-    // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set), avoiding double notification.
-    // Return-value contract: see JavaNotifier::deliverStoppedOnce — JNI_TRUE = a notice already
-    // reached Kotlin (delivered here, or the latch is owned by the error/EOF path); JNI_FALSE =
-    // our delivery failed — Kotlin self-runs the onStopped completion to recover the UI.
+    // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set).
+    // Return-value contract: see JavaNotifier::deliverStoppedOnce.
     return g_player.notifier.deliverStoppedOnce("playback stopped") ? JNI_TRUE : JNI_FALSE;
 }
 
