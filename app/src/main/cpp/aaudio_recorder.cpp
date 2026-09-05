@@ -447,19 +447,11 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv
     }
 
     // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set),
-    // same protocol as the player's stop path — claimed until the next start resets it.
-    // Return-value contract (same protocol as start): JNI_TRUE = a notice already reached Kotlin
-    // (delivered here, or the latch is owned by the error path); JNI_FALSE = our delivery
-    // failed — Kotlin self-runs the onStopped completion to recover the UI.
-    if (!g_recorder.notifier.claim()) {
-        return JNI_TRUE;  // error path owns the latch: the UI was already updated by its notice
-    }
-    if (g_recorder.notifier.deliverStopped("recording stopped")) {
-        return JNI_TRUE;
-    }
-    // Session is over either way; callVoidMethod already logged the reason and the latch is reset
-    // by the next start — JNI_FALSE just tells Kotlin to run the onStopped completion itself
-    return JNI_FALSE;
+    // same protocol as the player's stop path. Return-value contract: see
+    // JavaNotifier::deliverStoppedOnce — JNI_TRUE = a notice already reached Kotlin (delivered
+    // here, or the latch is owned by the error path); JNI_FALSE = our delivery failed — Kotlin
+    // self-runs the onStopped completion to recover the UI.
+    return g_recorder.notifier.deliverStoppedOnce("recording stopped") ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
@@ -467,12 +459,9 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_releaseNative(JNIEnv *env,
                                                                       jobject thiz) {
     LOGI("releaseNative");
 
-    // Stale-release guard: a newer instance has taken over the binding (rotation rebuild) —
-    // the stream/wav state and the reference below belong to it, not to this dead instance.
-    // (A null binding cannot coexist with live state: release clears both, and initialize's
-    // failure path clears the binding only while no state exists.)
-    if (g_recorder.notifier.instance && !env->IsSameObject(thiz, g_recorder.notifier.instance)) {
-        LOGW("Stale release ignored: binding owned by a newer instance");
+    // Stale-release guard: a newer instance owns the binding (rotation rebuild) — see
+    // JavaNotifier::isStaleRelease. The stream/wav state and the reference below belong to it.
+    if (g_recorder.notifier.isStaleRelease(env, thiz)) {
         return;
     }
 

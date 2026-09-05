@@ -220,10 +220,36 @@ struct JavaNotifier {
     bool claim() { return !notified.exchange(true, std::memory_order_acq_rel); }
     void release() { notified.store(false, std::memory_order_release); }
 
-    // Deliver onStopped; true iff delivered (mechanics only — the caller owns the latch policy,
-    // e.g. the EOF path releases on failure while the stop path reports the failure instead).
-    bool deliverStopped(const char* name) {
-        return callVoidMethod(jvm, instance, stopped_method, name);
+    // One-shot stopped notification: claim → deliver → release on failure (a later path can retry).
+    // True iff a notice reached Kotlin (delivered here, or the latch is owned by the error/EOF
+    // path); false = delivery failed — Kotlin self-runs the onStopped completion to recover the UI
+    // (the cross-language return-value contract of stopNativeXxx: JNI_TRUE ⇔ this true).
+    // Releasing on failure is uniform for all callers: the session is over either way (stop joins
+    // the workers before claiming; the EOF path is its worker's last act), and the next start's
+    // release() drops any leftover claim regardless.
+    bool deliverStoppedOnce(const char* name) {
+        if (!claim()) {
+            return true;  // error/EOF path owns the latch: the UI was already updated by its notice
+        }
+        if (callVoidMethod(jvm, instance, stopped_method, name)) {
+            return true;
+        }
+        // callVoidMethod already logged the reason; release so a later path can still notify
+        release();
+        return false;
+    }
+
+    // releaseNative: true when this call is STALE — a newer instance has taken over the binding
+    // (rotation rebuild), so the stream/wav state and the reference below belong to it, not to
+    // this dead instance; the caller must skip all cleanup. False = proceed with cleanup and call
+    // clear(env) afterwards. (A null binding cannot coexist with live state: release clears both,
+    // and initialize's failure path clears the binding only while no state exists.)
+    bool isStaleRelease(JNIEnv* env, jobject thiz) {
+        if (instance && !env->IsSameObject(thiz, instance)) {
+            AAC_LOGW("Stale release ignored: binding owned by a newer instance");
+            return true;
+        }
+        return false;
     }
 
     // The error-delivery policy shared by both engines: claim → deliver → release on failure so a

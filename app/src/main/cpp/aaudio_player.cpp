@@ -168,15 +168,12 @@ static void playReadThread() {
             g_player.is_playing.store(false, std::memory_order_release);
             if (const char* msg = g_player.rt_error.take()) {
                 g_player.notifier.deliverErrorOnce(msg, "playback error");
-            } else if (g_player.ring->readable() == 0 && g_player.notifier.claim()) {
+            } else if (g_player.ring->readable() == 0) {
                 // Notify stopped only on a genuine drain. An exit via stop_read_thread with data
                 // still queued is a user stop or a failed start — notification belongs to
                 // stopNativePlayback / the start-failure path, whose error this latch would swallow.
-                if (!g_player.notifier.deliverStopped("playback stopped")) {
-                    // Delivery failed: release the latch so a later user stop can still notify
-                    // (same rationale as the error path's latch release in deliverErrorOnce)
-                    g_player.notifier.release();
-                }
+                // No-op when the error path owns the latch (deliverStoppedOnce's claim fails).
+                g_player.notifier.deliverStoppedOnce("playback stopped");
             }
             if (g_player.underrun_count.load(std::memory_order_relaxed) > 0) {
                 LOGW("Playback underruns: %zu", g_player.underrun_count.load(std::memory_order_relaxed));
@@ -545,29 +542,18 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
 #endif
 
     // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set), avoiding double notification.
-    // Return-value contract (same protocol as start): JNI_TRUE = a notice already reached Kotlin
-    // (delivered here, or the latch is owned by the error/EOF path); JNI_FALSE = our delivery
-    // failed — Kotlin self-runs the onStopped completion to recover the UI.
-    if (!g_player.notifier.claim()) {
-        return JNI_TRUE;  // error/EOF path owns the latch: the UI was already updated by its notice
-    }
-    if (g_player.notifier.deliverStopped("playback stopped")) {
-        return JNI_TRUE;
-    }
-    // Session is over either way; callVoidMethod already logged the reason and the latch is reset
-    // by the next start — JNI_FALSE just tells Kotlin to run the onStopped completion itself
-    return JNI_FALSE;
+    // Return-value contract: see JavaNotifier::deliverStoppedOnce — JNI_TRUE = a notice already
+    // reached Kotlin (delivered here, or the latch is owned by the error/EOF path); JNI_FALSE =
+    // our delivery failed — Kotlin self-runs the onStopped completion to recover the UI.
+    return g_player.notifier.deliverStoppedOnce("playback stopped") ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_releaseNative(JNIEnv* env, jobject thiz) {
     LOGI("Releasing AAudio player");
 
-    // Stale-release guard: a newer instance has taken over the binding (rotation rebuild) —
-    // the stream/wav state and the reference below belong to it, not to this dead instance.
-    // (A null binding cannot coexist with live state: release clears both, and initialize's
-    // failure path clears the binding only while no state exists.)
-    if (g_player.notifier.instance && !env->IsSameObject(thiz, g_player.notifier.instance)) {
-        LOGW("Stale release ignored: binding owned by a newer instance");
+    // Stale-release guard: a newer instance owns the binding (rotation rebuild) — see
+    // JavaNotifier::isStaleRelease. The stream/wav state and the reference below belong to it.
+    if (g_player.notifier.isStaleRelease(env, thiz)) {
         return;
     }
 
