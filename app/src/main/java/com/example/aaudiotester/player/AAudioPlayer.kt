@@ -39,7 +39,16 @@ class AAudioPlayer(context: Context, nativeExecutor: Executor) :
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 Log.d(TAG, "Audio focus lost, stopping playback")
                 // Focus callbacks arrive on the main thread: serialized with other native calls via the shared executor
-                nativeExecutor.execute { stop() }
+                // Same Throwable guard as the Fragment's onEngineThread: a stop that throws must degrade to a
+                // retryable stuck session (the user can press Stop again), not kill the process. No listener
+                // notice: onError would disable the Stop button while the session is still active.
+                nativeExecutor.execute {
+                    try {
+                        stop()
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "Focus-loss stop failed", t)
+                    }
+                }
             }
         }
     }

@@ -59,7 +59,18 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
     init {
         // Bind on the shared executor, not the constructing (main) thread: every native entry stays
         // FIFO-ordered, so a rotation rebuild's initialize runs after the old instance's stop/release
-        nativeExecutor.execute { nativeBound = initializeNative() }
+        nativeExecutor.execute {
+            // Same Throwable guard as the Fragment's onEngineThread: a pending exception at the JNI
+            // boundary (GetMethodID failure, NewGlobalRef OOM) surfaces as a Kotlin throwable here
+            // and would kill the process. nativeBound stays false: start retries the bind, and a
+            // retry failure surfaces through the normal start error path. No listener notice — the
+            // listener may not be set yet, so the notification would be lost.
+            try {
+                nativeBound = initializeNative()
+            } catch (t: Throwable) {
+                Log.e(logTag, "Native initialization failed", t)
+            }
+        }
     }
 
     /** Binding is retryable: on rotation rebuild an unstopped old session can fail the first bind; rebind at start (native is idempotent, repeated calls are safe) */
