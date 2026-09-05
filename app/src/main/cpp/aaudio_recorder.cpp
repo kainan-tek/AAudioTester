@@ -429,14 +429,14 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv
             // Header backfill failed: recording data wasn't fully saved; report as an error rather than faking a normal finish
             if (!g_recorder.notifier.deliverErrorOnce(
                     "[FILE] Failed to finalize recording file (header write failed)", "recording error")) {
-                LOGW("Finalization failure could not be reported to the user (an earlier notice owns the latch)");
+                LOGW("Finalization failure could not be delivered (already reported by an earlier notice, or delivery failed)");
             }
         } else if (truncated) {
             // File is valid but incomplete (causes are mutually exclusive, the logcat LOGE tells
             // which): report instead of faking a full take. [TRUNC] is a distinct token (not [FILE])
             // so the Kotlin side matches on the protocol token, never on this message's wording
             if (!g_recorder.notifier.deliverErrorOnce("[TRUNC] Recording incomplete", "recording error")) {
-                LOGW("Incomplete-recording report could not be delivered to the user (an earlier notice owns the latch)");
+                LOGW("Incomplete-recording report could not be delivered (already reported by an earlier notice, or delivery failed)");
             }
         }
     }
