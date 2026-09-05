@@ -164,6 +164,83 @@ inline bool notifyErrorToJava(JavaVM* jvm, jobject instance, jmethodID method, c
     return true;
 }
 
+// Java notification endpoint for one engine: JVM + listener binding + the one-shot "already
+// notified" latch. One per engine, instantiated inside the engines' file-static state structs
+// (header-only, so no ODR risk — same rationale as RtErrorSlot).
+//
+// Thread discipline (invariants previously restated at each use, now stated once):
+//  - jvm is set once from JNI_OnLoad before any thread can use it.
+//  - instance/methods are written only on the engine's executor under the join-before-rebind
+//    invariant (initializeNative joins any leftover worker BEFORE rebinding; AAudioStream close
+//    joins in-flight callbacks), so a worker's late notifications always run against the binding
+//    they were created under.
+//  - The latch is atomic: claim() is an acq_rel exchange, release() a release-store.
+struct JavaNotifier {
+    JavaVM* jvm = nullptr;
+    jobject instance = nullptr;
+    jmethodID stopped_method = nullptr;
+    jmethodID error_method = nullptr;
+    std::atomic<bool> notified{false};  // claimed ⇔ some notice was successfully delivered (until the next start resets it)
+
+    // initializeNative: rebind to a fresh fragment instance (delete old global ref → new ref →
+    // method IDs). Returns false on failure with the binding fully cleared.
+    bool bind(JNIEnv* env, jobject thiz, const char* what,
+              const char* stopped_name, const char* error_name) {
+        jclass clazz = bindJavaInstance(env, thiz, instance, what);
+        if (!clazz) {
+            return false;
+        }
+        stopped_method = env->GetMethodID(clazz, stopped_name, "()V");
+        error_method = env->GetMethodID(clazz, error_name, "(Ljava/lang/String;)V");
+        env->DeleteLocalRef(clazz);  // single deletion point: the local ref exists only in this scope
+        if (!stopped_method || !error_method) {
+            AAC_LOGW("Failed to get %s callback method IDs", what);
+            if (instance) {
+                env->DeleteGlobalRef(instance);
+                instance = nullptr;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // releaseNative: drop the binding (global ref + method IDs). Executor-side only.
+    void clear(JNIEnv* env) {
+        if (instance) {
+            env->DeleteGlobalRef(instance);
+            instance = nullptr;
+            stopped_method = nullptr;
+            error_method = nullptr;
+        }
+    }
+
+    // Latch primitives. claim() takes the one-shot notification right (false = a notice was
+    // already delivered); release() gives it back — on delivery failure (so a later path can
+    // retry) and at start (dropping the previous session's final in-flight claim).
+    bool claim() { return !notified.exchange(true, std::memory_order_acq_rel); }
+    void release() { notified.store(false, std::memory_order_release); }
+
+    // Deliver onStopped; true iff delivered (mechanics only — the caller owns the latch policy,
+    // e.g. the EOF path releases on failure while the stop path reports the failure instead).
+    bool deliverStopped(const char* name) {
+        return callVoidMethod(jvm, instance, stopped_method, name);
+    }
+
+    // The error-delivery policy shared by both engines: claim → deliver → release on failure so a
+    // later path can retry. True iff delivered (false = swallowed by an earlier notice, or
+    // delivery failed — callers with a genuine loss to report keep it attributable in logcat).
+    bool deliverErrorOnce(const std::string& error, const char* name) {
+        if (!claim()) {
+            return false;
+        }
+        if (notifyErrorToJava(jvm, instance, error_method, error, name)) {
+            return true;
+        }
+        release();
+        return false;
+    }
+};
+
 // format → bytes per sample (unknown formats treated as 16-bit)
 inline int32_t bytesPerSample(aaudio_format_t format) {
     switch (format) {

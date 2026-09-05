@@ -42,7 +42,6 @@ struct AudioPlayerState {
     aaudio_common::AAudioStreamPtr stream;
     std::unique_ptr<WavFile> wav_file;
     std::atomic<bool> is_playing{false};
-    std::atomic<bool> callback_notified{false};  // true if Java already notified by callback
 
     // Playback data buffer: reader thread (producer) → callback (consumer), moving disk I/O out of the real-time callback.
     std::unique_ptr<SpScRingBuffer> ring;
@@ -54,10 +53,8 @@ struct AudioPlayerState {
     // Java by the reader thread on a non-RT thread (protocol in RtErrorSlot)
     aaudio_common::RtErrorSlot rt_error;
 
-    JavaVM* jvm = nullptr;
-    jobject player_instance = nullptr;
-    jmethodID on_playback_stopped_method = nullptr;
-    jmethodID on_playback_error_method = nullptr;
+    // Java notification endpoint: listener binding + one-shot latch (mechanics in aaudio_common)
+    aaudio_common::JavaNotifier notifier;
 
     aaudio_usage_t usage = AAUDIO_USAGE_MEDIA;
     aaudio_content_type_t content_type = AAUDIO_CONTENT_TYPE_MUSIC;
@@ -93,7 +90,7 @@ size_t readChunkBytes() {
 }  // namespace
 
 void aaudio_player_set_jvm(JavaVM* vm) {
-    g_player.jvm = vm;
+    g_player.notifier.jvm = vm;
 }
 
 #if LATENCY_TEST_ENABLE
@@ -132,25 +129,6 @@ static inline bool writeGpioValue(int value) {
 
 #endif
 
-static bool notifyPlaybackStopped() {
-    return aaudio_common::callVoidMethod(g_player.jvm, g_player.player_instance, g_player.on_playback_stopped_method,
-                                         "playback stopped");
-}
-
-static void notifyPlaybackError(const std::string& error) {
-    // Atomic dedup: the rt_error path and errorCallback may deliver concurrently; notify only once.
-    // If already set (stopped/error), ignore; subsequent stopNativePlayback also won't resend onStopped over an error notice
-    if (g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
-        return;
-    }
-    if (!aaudio_common::notifyErrorToJava(g_player.jvm, g_player.player_instance, g_player.on_playback_error_method,
-                                          error, "playback error")) {
-        // Delivery failed: release the latch so the stop path can still notify (duplicate beats lost —
-        // a consumed latch with no delivery would leave the UI stuck in PLAYING forever)
-        g_player.callback_notified.store(false, std::memory_order_release);
-    }
-}
-
 // Stop the reader thread and join (shared by failed start and normal stop).
 static void stopReadThread() {
     g_player.stop_read_thread.store(true, std::memory_order_release);
@@ -168,7 +146,7 @@ static void playReadThread() {
         // Terminal error set by the RT callback: delivered here to avoid JNI on the callback thread
         if (const char* msg = g_player.rt_error.take()) {
             g_player.is_playing.store(false, std::memory_order_release);
-            notifyPlaybackError(msg);
+            g_player.notifier.deliverErrorOnce(msg, "playback error");
             return;
         }
         const size_t n = g_player.wav_file->readAudioData(buf.data(), buf.size());
@@ -176,7 +154,8 @@ static void playReadThread() {
             if (g_player.wav_file->hasReadError()) {
                 // I/O error or truncated file: report as an error rather than faking a normal EOF
                 g_player.is_playing.store(false, std::memory_order_release);
-                notifyPlaybackError("[FILE] Audio read failed or file truncated");
+                g_player.notifier.deliverErrorOnce("[FILE] Audio read failed or file truncated",
+                                                   "playback error");
                 return;
             }
             g_player.eof_reached.store(true, std::memory_order_release);  // File fully read
@@ -188,16 +167,15 @@ static void playReadThread() {
             }
             g_player.is_playing.store(false, std::memory_order_release);
             if (const char* msg = g_player.rt_error.take()) {
-                notifyPlaybackError(msg);
-            } else if (g_player.ring->readable() == 0 &&
-                       !g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+                g_player.notifier.deliverErrorOnce(msg, "playback error");
+            } else if (g_player.ring->readable() == 0 && g_player.notifier.claim()) {
                 // Notify stopped only on a genuine drain. An exit via stop_read_thread with data
                 // still queued is a user stop or a failed start — notification belongs to
                 // stopNativePlayback / the start-failure path, whose error this latch would swallow.
-                if (!notifyPlaybackStopped()) {
+                if (!g_player.notifier.deliverStopped("playback stopped")) {
                     // Delivery failed: release the latch so a later user stop can still notify
-                    // (same rationale as the error path's latch release in notifyPlaybackError)
-                    g_player.callback_notified.store(false, std::memory_order_release);
+                    // (same rationale as the error path's latch release in deliverErrorOnce)
+                    g_player.notifier.release();
                 }
             }
             if (g_player.underrun_count.load(std::memory_order_relaxed) > 0) {
@@ -224,7 +202,7 @@ static void playReadThread() {
     // Before exit, deliver an error the RT callback may have set during the stop race window
     if (const char* msg = g_player.rt_error.take()) {
         g_player.is_playing.store(false, std::memory_order_release);
-        notifyPlaybackError(msg);
+        g_player.notifier.deliverErrorOnce(msg, "playback error");
     }
 }
 
@@ -409,22 +387,8 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_ini
     // the new instance. Idempotent when no worker is left.
     stopReadThread();
 
-    jclass clazz = aaudio_common::bindJavaInstance(env, thiz, g_player.player_instance, "player");
-    if (!clazz) {
-        return JNI_FALSE;
-    }
-
-    g_player.on_playback_stopped_method = env->GetMethodID(clazz, "onNativePlaybackStopped", "()V");
-    g_player.on_playback_error_method = env->GetMethodID(clazz, "onNativePlaybackError", "(Ljava/lang/String;)V");
-
-    env->DeleteLocalRef(clazz);
-
-    if (!g_player.on_playback_stopped_method || !g_player.on_playback_error_method) {
-        LOGE("Failed to get callback method IDs");
-        if (g_player.player_instance) {
-            env->DeleteGlobalRef(g_player.player_instance);
-            g_player.player_instance = nullptr;
-        }
+    if (!g_player.notifier.bind(env, thiz, "player",
+                                "onNativePlaybackStopped", "onNativePlaybackError")) {
         return JNI_FALSE;
     }
 
@@ -476,19 +440,19 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
 
     stopReadThread();  // Clean up the leftover/unjoined reader thread from the last EOF/error, avoiding reassigning a joinable thread (which would terminate)
 
-    g_player.callback_notified.store(false, std::memory_order_release);
+    g_player.notifier.release();  // drop the previous session's final in-flight claim
 
     g_player.wav_file = std::make_unique<WavFile>();
     if (!g_player.wav_file->openRead(g_player.audio_file_path)) {
         LOGE("Failed to open: %s", g_player.audio_file_path.c_str());
         g_player.wav_file.reset();
-        notifyPlaybackError("[FILE] Cannot open audio file");
+        g_player.notifier.deliverErrorOnce("[FILE] Cannot open audio file", "playback error");
         return JNI_FALSE;
     }
 
     if (!createAAudioStream()) {
         g_player.wav_file.reset();
-        notifyPlaybackError("[STREAM] Failed to create playback stream");
+        g_player.notifier.deliverErrorOnce("[STREAM] Failed to create playback stream", "playback error");
         return JNI_FALSE;
     }
 
@@ -513,8 +477,10 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
         g_player.stream.reset();
         g_player.ring.reset();
         g_player.wav_file.reset();
-        notifyPlaybackError(read_failed ? "[FILE] Audio read failed or file truncated"
-                                        : "[FILE] Audio file contains no audio data");
+        g_player.notifier.deliverErrorOnce(
+            read_failed ? "[FILE] Audio read failed or file truncated"
+                        : "[FILE] Audio file contains no audio data",
+            "playback error");
         return JNI_FALSE;
     }
     g_player.ring->write(prefill.data(), n);
@@ -543,7 +509,7 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
         g_player.stream.reset();
         g_player.wav_file.reset();
         g_player.ring.reset();
-        notifyPlaybackError("[STREAM] Failed to start playback stream");
+        g_player.notifier.deliverErrorOnce("[STREAM] Failed to start playback stream", "playback error");
         return JNI_FALSE;
     }
 
@@ -582,10 +548,10 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
     // Return-value contract (same protocol as start): JNI_TRUE = a notice already reached Kotlin
     // (delivered here, or the latch is owned by the error/EOF path); JNI_FALSE = our delivery
     // failed — Kotlin self-runs the onStopped completion to recover the UI.
-    if (g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+    if (!g_player.notifier.claim()) {
         return JNI_TRUE;  // error/EOF path owns the latch: the UI was already updated by its notice
     }
-    if (notifyPlaybackStopped()) {
+    if (g_player.notifier.deliverStopped("playback stopped")) {
         return JNI_TRUE;
     }
     // Session is over either way; callVoidMethod already logged the reason and the latch is reset
@@ -600,7 +566,7 @@ JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_release
     // the stream/wav state and the reference below belong to it, not to this dead instance.
     // (A null binding cannot coexist with live state: release clears both, and initialize's
     // failure path clears the binding only while no state exists.)
-    if (g_player.player_instance && !env->IsSameObject(thiz, g_player.player_instance)) {
+    if (g_player.notifier.instance && !env->IsSameObject(thiz, g_player.notifier.instance)) {
         LOGW("Stale release ignored: binding owned by a newer instance");
         return;
     }
@@ -615,12 +581,7 @@ JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_release
     // Binding is either unset or still ours here (the stale-release guard above returns on any
     // takeover, and initialize cannot interleave — all native entry is FIFO on the shared
     // executor): safe to clear the reference and method IDs.
-    if (g_player.player_instance) {
-        env->DeleteGlobalRef(g_player.player_instance);
-        g_player.player_instance = nullptr;
-        g_player.on_playback_stopped_method = nullptr;
-        g_player.on_playback_error_method = nullptr;
-    }
+    g_player.notifier.clear(env);
 
     LOGI("AAudioPlayer released");
 }

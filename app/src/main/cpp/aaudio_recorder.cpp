@@ -32,7 +32,6 @@ struct AudioRecorderState {
     aaudio_common::AAudioStreamPtr stream;
     std::unique_ptr<WavFile> wav_file;
     std::atomic<bool> is_recording{false};
-    std::atomic<bool> callback_notified{false};  // true if Java already notified by callback
 
     // Recording data buffer: callback (producer) → writer thread (consumer), moving disk I/O out of the real-time callback.
     std::unique_ptr<SpScRingBuffer> ring;
@@ -43,10 +42,8 @@ struct AudioRecorderState {
     // Java by the writer thread on a non-RT thread (protocol in RtErrorSlot)
     aaudio_common::RtErrorSlot rt_error;
 
-    JavaVM *jvm = nullptr;
-    jobject recorder_instance = nullptr;
-    jmethodID on_recording_stopped_method = nullptr;
-    jmethodID on_recording_error_method = nullptr;
+    // Java notification endpoint: listener binding + one-shot latch (mechanics in aaudio_common)
+    aaudio_common::JavaNotifier notifier;
 
     aaudio_input_preset_t input_preset = AAUDIO_INPUT_PRESET_GENERIC;
     int32_t sample_rate = 48000;
@@ -70,30 +67,7 @@ namespace {
 }  // namespace
 
 void aaudio_recorder_set_jvm(JavaVM* vm) {
-    g_recorder.jvm = vm;
-}
-
-static bool notifyRecordingStopped() {
-    return aaudio_common::callVoidMethod(g_recorder.jvm, g_recorder.recorder_instance,
-                                         g_recorder.on_recording_stopped_method, "recording stopped");
-}
-
-// Returns false when the error was NOT delivered to Java (dedup-swallowed by an earlier notice,
-// or delivery failed) so callers with a genuine loss to report can keep it attributable in logcat.
-static bool notifyRecordingError(const std::string &error) {
-    // Atomic dedup: the rt_error path and errorCallback may deliver concurrently; notify only once.
-    // If already set (stopped/error), ignore; subsequent stopNativeRecording also won't resend onStopped over an error notice
-    if (g_recorder.callback_notified.exchange(true, std::memory_order_acq_rel)) {
-        return false;
-    }
-    if (!aaudio_common::notifyErrorToJava(g_recorder.jvm, g_recorder.recorder_instance,
-                                          g_recorder.on_recording_error_method, error, "recording error")) {
-        // Delivery failed: release the latch so the stop path can still notify (duplicate beats lost —
-        // a consumed latch with no delivery would leave the UI stuck in RECORDING forever)
-        g_recorder.callback_notified.store(false, std::memory_order_release);
-        return false;
-    }
-    return true;
+    g_recorder.notifier.jvm = vm;
 }
 
 // Stop the writer thread and join (the writer drains remaining buffered data to disk before joining).
@@ -125,7 +99,7 @@ static void recordWriteThread() {
         // Terminal error set by the RT callback: delivered here to avoid JNI on the callback thread
         if (const char* msg = g_recorder.rt_error.take()) {
             g_recorder.is_recording.store(false, std::memory_order_release);
-            notifyRecordingError(msg);
+            g_recorder.notifier.deliverErrorOnce(msg, "recording error");
             // break, not return: the ring still holds audio captured before the stream died —
             // valid data, so the exit-drain below saves it. The stop path joins this thread
             // before closing the WAV file, so the drained tail lands in a consistent file.
@@ -146,7 +120,7 @@ static void recordWriteThread() {
     // After draining, deliver an error the RT callback may have set during the stop race window
     if (const char* msg = g_recorder.rt_error.take()) {
         g_recorder.is_recording.store(false, std::memory_order_release);
-        notifyRecordingError(msg);
+        g_recorder.notifier.deliverErrorOnce(msg, "recording error");
     }
     if (save_failed) {
         LOGW("Recording finished: %zu bytes not saved (file write failed)", unsaved_bytes);
@@ -302,28 +276,11 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_initializeNative(JNIEnv *e
     // so its late notifications always land on the instance they were created under. Idempotent.
     stopWriteThread();
 
-    jclass clazz =
-        aaudio_common::bindJavaInstance(env, thiz, g_recorder.recorder_instance, "recorder");
-    if (!clazz) {
+    if (!g_recorder.notifier.bind(env, thiz, "recorder",
+                                  "onNativeRecordingStopped", "onNativeRecordingError")) {
         return JNI_FALSE;
     }
 
-    g_recorder.on_recording_stopped_method = env->GetMethodID(clazz, "onNativeRecordingStopped",
-                                                              "()V");
-    g_recorder.on_recording_error_method = env->GetMethodID(clazz, "onNativeRecordingError",
-                                                            "(Ljava/lang/String;)V");
-
-    if (!g_recorder.on_recording_stopped_method || !g_recorder.on_recording_error_method) {
-        LOGE("Failed to get callback method IDs");
-        env->DeleteLocalRef(clazz);
-        if (g_recorder.recorder_instance) {
-            env->DeleteGlobalRef(g_recorder.recorder_instance);
-            g_recorder.recorder_instance = nullptr;
-        }
-        return JNI_FALSE;
-    }
-
-    env->DeleteLocalRef(clazz);
     return JNI_TRUE;
 }
 
@@ -389,10 +346,11 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
 
     stopWriteThread();  // Clean up the leftover/unjoined writer thread from the last error (drain old data first, then rebuild resources)
 
-    g_recorder.callback_notified.store(false, std::memory_order_release);
+    g_recorder.notifier.release();  // drop the previous session's final in-flight claim
 
     if (!createAAudioStream()) {
-        notifyRecordingError("[STREAM] Failed to create recording stream");
+        g_recorder.notifier.deliverErrorOnce("[STREAM] Failed to create recording stream",
+                                             "recording error");
         return JNI_FALSE;
     }
 
@@ -404,7 +362,8 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
         LOGE("Failed to open WAV file: %s", file_path.c_str());
         g_recorder.stream.reset();
         g_recorder.wav_file.reset();
-        notifyRecordingError("[FILE] Failed to create recording file");
+        g_recorder.notifier.deliverErrorOnce("[FILE] Failed to create recording file",
+                                             "recording error");
         return JNI_FALSE;
     }
 
@@ -435,7 +394,8 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
         }
         g_recorder.wav_file.reset();
         g_recorder.ring.reset();
-        notifyRecordingError("[STREAM] Failed to start recording stream");
+        g_recorder.notifier.deliverErrorOnce("[STREAM] Failed to start recording stream",
+                                             "recording error");
         return JNI_FALSE;
     }
 
@@ -467,14 +427,15 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv
         g_recorder.wav_file.reset();
         if (!finalized) {
             // Header backfill failed: recording data wasn't fully saved; report as an error rather than faking a normal finish
-            if (!notifyRecordingError("[FILE] Failed to finalize recording file (header write failed)")) {
+            if (!g_recorder.notifier.deliverErrorOnce(
+                    "[FILE] Failed to finalize recording file (header write failed)", "recording error")) {
                 LOGW("Finalization failure could not be reported to the user (an earlier notice owns the latch)");
             }
         } else if (truncated) {
             // File is valid but incomplete (causes are mutually exclusive, the logcat LOGE tells
             // which): report instead of faking a full take. [TRUNC] is a distinct token (not [FILE])
             // so the Kotlin side matches on the protocol token, never on this message's wording
-            if (!notifyRecordingError("[TRUNC] Recording incomplete")) {
+            if (!g_recorder.notifier.deliverErrorOnce("[TRUNC] Recording incomplete", "recording error")) {
                 LOGW("Incomplete-recording report could not be delivered to the user (an earlier notice owns the latch)");
             }
         }
@@ -490,10 +451,10 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv
     // Return-value contract (same protocol as start): JNI_TRUE = a notice already reached Kotlin
     // (delivered here, or the latch is owned by the error path); JNI_FALSE = our delivery
     // failed — Kotlin self-runs the onStopped completion to recover the UI.
-    if (g_recorder.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+    if (!g_recorder.notifier.claim()) {
         return JNI_TRUE;  // error path owns the latch: the UI was already updated by its notice
     }
-    if (notifyRecordingStopped()) {
+    if (g_recorder.notifier.deliverStopped("recording stopped")) {
         return JNI_TRUE;
     }
     // Session is over either way; callVoidMethod already logged the reason and the latch is reset
@@ -510,7 +471,7 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_releaseNative(JNIEnv *env,
     // the stream/wav state and the reference below belong to it, not to this dead instance.
     // (A null binding cannot coexist with live state: release clears both, and initialize's
     // failure path clears the binding only while no state exists.)
-    if (g_recorder.recorder_instance && !env->IsSameObject(thiz, g_recorder.recorder_instance)) {
+    if (g_recorder.notifier.instance && !env->IsSameObject(thiz, g_recorder.notifier.instance)) {
         LOGW("Stale release ignored: binding owned by a newer instance");
         return;
     }
@@ -525,12 +486,7 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_releaseNative(JNIEnv *env,
     // Binding is either unset or still ours here (the stale-release guard above returns on any
     // takeover, and initialize cannot interleave — all native entry is FIFO on the shared
     // executor): safe to clear the reference and method IDs.
-    if (g_recorder.recorder_instance) {
-        env->DeleteGlobalRef(g_recorder.recorder_instance);
-        g_recorder.recorder_instance = nullptr;
-        g_recorder.on_recording_stopped_method = nullptr;
-        g_recorder.on_recording_error_method = nullptr;
-    }
+    g_recorder.notifier.clear(env);
 
     LOGI("AAudioRecorder released");
 }
