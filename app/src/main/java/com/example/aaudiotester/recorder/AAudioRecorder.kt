@@ -24,7 +24,6 @@ class AAudioRecorder(context: Context, nativeExecutor: Executor) :
     override val alreadyActiveNotice = "Already recording"
 
     private val appContext = context.applicationContext
-    private var currentConfig: AAudioConfig = AAudioConfig()
 
     override fun setAudioConfig(config: AAudioConfig) {
         if (isActive()) {
@@ -45,11 +44,7 @@ class AAudioRecorder(context: Context, nativeExecutor: Executor) :
             AAudioConstants.getSharingMode(config.sharingMode),
             audioFilePath
         )
-        if (applied) {
-            currentConfig = config
-        } else {
-            Log.w(TAG, "Native rejected configuration, keeping previous")
-        }
+        onConfigApplied(config, applied)
     }
 
     override fun beforeStartNative(): String? {
@@ -71,10 +66,10 @@ class AAudioRecorder(context: Context, nativeExecutor: Executor) :
     }
 
     // Native methods (JNI binds by this class's name; the base's protocol hooks route here)
-    protected external override fun initializeNative(): Boolean
-    protected external override fun startNative(): Boolean
-    protected external override fun stopNative(): Boolean
-    protected external override fun releaseNative()
+    external override fun initializeNative(): Boolean
+    external override fun startNative(): Boolean
+    external override fun stopNative(): Boolean
+    external override fun releaseNative()
 
     private external fun setNativeConfig(
         inputPreset: Int, sampleRate: Int, channelCount: Int, format: Int,

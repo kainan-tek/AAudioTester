@@ -66,7 +66,7 @@ adb logcat -s AAudioPlayer AAudioRecorder
 | `channelCount` | 录音 | `1` | 声道数 |
 | `format` | 录音 | `16` | 位深 16/24/32 |
 | `audioFilePath` | 两者 | 空 | 播放：空 = 内置音源（解压到私有目录），或 `/data/xx.wav`；录音：空 = 私有目录自动命名 |
-| `description` | 两者 | `Custom Configuration` | Spinner 显示名 |
+| `description` | 两者 | `Default Configuration` | Spinner 显示名 |
 
 ### 示例
 

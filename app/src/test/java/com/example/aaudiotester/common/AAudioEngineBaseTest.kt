@@ -3,8 +3,10 @@ package com.example.aaudiotester.common
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -15,7 +17,20 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class AAudioEngineBaseTest {
 
-    private class FakeEngine(bindResult: Boolean = true) : AAudioEngineBase(Runnable::run) {
+    /** Defers the constructor-time bind until drain(): the bind then runs against the fully constructed engine, like the production executor race-free case. */
+    private class QueueExecutor : Executor {
+        private val tasks = mutableListOf<Runnable>()
+        override fun execute(command: Runnable) { tasks += command }
+        fun runAll() { val pending = tasks.toList(); tasks.clear(); pending.forEach { it.run() } }
+    }
+
+    private class FakeEngine(private val executor: QueueExecutor = QueueExecutor(), bindResult: Boolean = true) :
+        AAudioEngineBase(executor) {
+
+        fun runQueuedTasks() = executor.runAll()
+
+        // Test bridge to the guarded-execution discipline
+        fun submitFailingGuardedTask() = executeGuarded("test task") { throw OutOfMemoryError("test") }
         override val logTag = "FakeEngine"
         override val sessionLabel = "fake"
         override val alreadyActiveNotice = "Already fake"
@@ -23,19 +38,23 @@ class AAudioEngineBaseTest {
         var bindResult = bindResult
         var beforeStartError: String? = null
         @Volatile var startNativeResult = true
+        @Volatile var startNativeError: Throwable? = null
         @Volatile var stopNativeResult = true
+        @Volatile var stopNativeError: Throwable? = null
+        @Volatile var releaseNativeError: Throwable? = null
 
         var startNativeCalls = 0; private set
         var stopNativeCalls = 0; private set
         var releaseNativeCalls = 0; private set
         var terminatedCalls = 0; private set
+        var initializeNativeCalls = 0; private set
 
         // Hold startNative while the test injects a racing native notice
         val holdStartNative = AtomicBoolean(false)
         val startNativeEntered = CountDownLatch(1)
         val releaseStartNative = CountDownLatch(1)
 
-        override fun initializeNative() = bindResult
+        override fun initializeNative(): Boolean { initializeNativeCalls++; return bindResult }
         override fun beforeStartNative(): String? = beforeStartError
         override fun startNative(): Boolean {
             startNativeCalls++
@@ -43,10 +62,18 @@ class AAudioEngineBaseTest {
                 startNativeEntered.countDown()
                 assertTrue(releaseStartNative.await(5, TimeUnit.SECONDS))
             }
+            startNativeError?.let { throw it }
             return startNativeResult
         }
-        override fun stopNative(): Boolean { stopNativeCalls++; return stopNativeResult }
-        override fun releaseNative() { releaseNativeCalls++ }
+        override fun stopNative(): Boolean {
+            stopNativeCalls++
+            stopNativeError?.let { throw it }
+            return stopNativeResult
+        }
+        override fun releaseNative() {
+            releaseNativeCalls++
+            releaseNativeError?.let { throw it }
+        }
         override fun onSessionTerminated() { terminatedCalls++ }
         override fun setAudioConfig(config: AAudioConfig) {}  // engine-specific: not under test here
 
@@ -63,9 +90,10 @@ class AAudioEngineBaseTest {
     }
 
     private fun newEngine(bindResult: Boolean = true): Pair<FakeEngine, RecordingListener> {
-        val engine = FakeEngine(bindResult)
+        val engine = FakeEngine(bindResult = bindResult)
         val listener = RecordingListener()
         engine.setListener(listener)
+        engine.runQueuedTasks()  // constructor-time bind, now against the fully constructed engine
         return engine to listener
     }
 
@@ -84,11 +112,13 @@ class AAudioEngineBaseTest {
     fun `error delivered during start wins over started`() {
         val (engine, listener) = newEngine()
         engine.holdStartNative.set(true)
-        val startThread = startAsync(engine)
+        val startReturn = AtomicBoolean(true)
+        val startThread = Thread { startReturn.set(engine.start()) }.apply { start() }
         assertTrue(engine.startNativeEntered.await(5, TimeUnit.SECONDS))
         engine.simulateNativeError("[TEST] raced error")
         engine.releaseStartNative.countDown()
         startThread.join(1000)
+        assertFalse(startReturn.get())  // the CAS lost: the notice owns the started signal
         assertFalse(engine.isActive())
         assertEquals(listOf("error:[TEST] raced error"), listener.events)
     }
@@ -97,11 +127,13 @@ class AAudioEngineBaseTest {
     fun `stopped delivered during start wins over started`() {
         val (engine, listener) = newEngine()
         engine.holdStartNative.set(true)
-        val startThread = startAsync(engine)
+        val startReturn = AtomicBoolean(true)
+        val startThread = Thread { startReturn.set(engine.start()) }.apply { start() }
         assertTrue(engine.startNativeEntered.await(5, TimeUnit.SECONDS))
         engine.simulateNativeStopped()
         engine.releaseStartNative.countDown()
         startThread.join(1000)
+        assertFalse(startReturn.get())  // the CAS lost: the notice owns the started signal
         assertFalse(engine.isActive())
         assertEquals(listOf("stopped"), listener.events)
     }
@@ -133,6 +165,15 @@ class AAudioEngineBaseTest {
         assertFalse(engine.start())
         assertEquals(0, engine.startNativeCalls)
         assertTrue(listener.events.single().contains("Native initialization failed"))
+    }
+
+    @Test
+    fun `constructor-time bind succeeds and start does not re-bind`() {
+        val (engine, _) = newEngine()
+        assertEquals(1, engine.initializeNativeCalls)  // the constructor-time bind ran against the fully constructed engine
+        assertTrue(engine.start())
+        assertEquals(1, engine.initializeNativeCalls)  // ensureNativeBound skipped the retry
+        assertTrue(engine.isActive())
     }
 
     @Test
@@ -221,6 +262,52 @@ class AAudioEngineBaseTest {
         // Listener is detached by release: no further notifications
         engine.simulateNativeError("[TEST] after release")
         assertEquals(listOf("started", "error:[TEST] error"), listener.events)
+    }
+
+    @Test
+    fun `release settles to idle even when releaseNative throws`() {
+        val (engine, _) = newEngine()
+        assertTrue(engine.start())
+        // Enter release from a terminal ERROR state (no inner stop() that would settle first)
+        engine.simulateNativeError("[TEST] error")
+        engine.releaseNativeError = OutOfMemoryError("jni boundary")
+        try {
+            engine.release(); fail("Error must propagate to the outer guard")
+        } catch (expected: OutOfMemoryError) {}
+        engine.stop()
+        assertEquals(0, engine.stopNativeCalls)  // settled: the late stop hit the IDLE gate
+    }
+
+    @Test
+    fun `executeGuarded swallows task throwables`() {
+        val (engine, _) = newEngine()
+        engine.submitFailingGuardedTask()
+        engine.runQueuedTasks()  // must not propagate the Error to the submitting thread
+    }
+
+    @Test
+    fun `release reclaims native state even when stop throws`() {
+        val (engine, _) = newEngine()
+        assertTrue(engine.start())
+        engine.stopNativeError = OutOfMemoryError("jni boundary")
+        try {
+            engine.release(); fail("Error must propagate to the outer guard")
+        } catch (expected: OutOfMemoryError) {}
+        assertEquals(1, engine.releaseNativeCalls)  // reclaimed despite the escaped Error
+        assertEquals(1, engine.terminatedCalls)     // focus released despite the escaped Error
+        engine.stop()
+        assertEquals(1, engine.stopNativeCalls)     // the late stop hit the IDLE gate
+    }
+
+    @Test
+    fun `start releases acquired focus when startNative throws`() {
+        val (engine, _) = newEngine()
+        engine.startNativeError = OutOfMemoryError("jni boundary")
+        try {
+            engine.start(); fail("Error must propagate to the outer guard")
+        } catch (expected: OutOfMemoryError) {}
+        assertEquals(1, engine.terminatedCalls)  // stands in for the player's focus release
+        assertFalse(engine.isActive())
     }
 
     @Test

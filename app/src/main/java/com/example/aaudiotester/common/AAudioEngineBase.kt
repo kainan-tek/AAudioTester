@@ -12,13 +12,8 @@ import java.util.concurrent.atomic.AtomicReference
  * terminal notice delivered from a native thread during startNative used to be overwritten):
  *
  *   IDLE --CAS--> ACTIVE    (start postlude; the ONLY writer of ACTIVE, one atomic transition)
- *   any  --> ERROR          (onNativeError, native thread: needs a cleanup stop via Fragment.onError)
- *   any  --> CLOSED         (onNativeStopped, native thread or stop's delivery-failure fallback)
+ *   any  --> TERMINAL       (onNativeError / onNativeStopped — see those for their differing semantics)
  *   any  --> IDLE           (stop / release settle)
- *
- * ERROR vs CLOSED: an error leaves native state to clean up (Fragment.onError queues a stop when
- * isActive() is false), while a stopped/EOF notice means native already tore the session down —
- * hence two distinct terminal states, and start() settles both back to IDLE before re-arming.
  *
  * Subclasses keep only what genuinely differs: their JNI entry points (bound by class name, so the
  * external declarations and the JNI-named callback forwarders must stay in the subclass), config
@@ -26,10 +21,35 @@ import java.util.concurrent.atomic.AtomicReference
  */
 abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudioEngine {
 
-    private enum class SessionState { IDLE, ACTIVE, ERROR, CLOSED }
+    companion object {
+        // Construction-time log tag: the init task below can run on the executor while the subclass
+        // properties (logTag included) are still initializing, so the failure log must not read them
+        private const val TAG = "AAudioEngineBase"
+    }
+
+    private enum class SessionState { IDLE, ACTIVE, TERMINAL }
 
     private val state = AtomicReference(SessionState.IDLE)
-    private var listener: AAudioEngine.Listener? = null
+
+    @Volatile
+    private var listener: AAudioEngine.Listener? = null  // written by setListener (main thread) and release (executor), dereferenced from native worker threads (onNativeError/onNativeStopped) — JMM-shared
+
+    // The config the native layer actually holds (updated only on an applied setAudioConfig —
+    // see onConfigApplied); read by the subclasses' beforeStartNative
+    protected var currentConfig: AAudioConfig = AAudioConfig()
+        private set
+
+    /** The single writer of [currentConfig]: a rejected config must not update it. */
+    protected fun onConfigApplied(config: AAudioConfig, applied: Boolean) {
+        // Native is the source of truth: a rejected config must not update currentConfig, or start
+        // would use parameters that were never applied. Rejection is defensive — the UI locks the
+        // spinner across the whole busy window, so no switch can be in flight; expect true here.
+        if (applied) {
+            currentConfig = config
+        } else {
+            Log.w(logTag, "Native rejected configuration, keeping previous")
+        }
+    }
 
     @Volatile
     private var nativeBound = false  // initializeNative may fail on rotation rebuild if the old session hasn't stopped; retried at start
@@ -59,16 +79,24 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
     init {
         // Bind on the shared executor, not the constructing (main) thread: every native entry stays
         // FIFO-ordered, so a rotation rebuild's initialize runs after the old instance's stop/release
+        executeGuarded("native bind") {
+            nativeBound = initializeNative()
+        }
+    }
+
+    /**
+     * Submits to the native executor behind the JNI-boundary Throwable guard: a pending exception
+     * at the boundary (GetMethodID failure, NewGlobalRef OOM) surfaces as a Kotlin throwable and
+     * would kill the process if submitted bare. Log-only on failure — callers with UI to recover
+     * surface it via the listener callbacks (the Fragment's onEngineThread has its own guard with
+     * a different, UI-recovering policy).
+     */
+    protected fun executeGuarded(what: String, task: () -> Unit) {
         nativeExecutor.execute {
-            // Same Throwable guard as the Fragment's onEngineThread: a pending exception at the JNI
-            // boundary (GetMethodID failure, NewGlobalRef OOM) surfaces as a Kotlin throwable here
-            // and would kill the process. nativeBound stays false: start retries the bind, and a
-            // retry failure surfaces through the normal start error path. No listener notice — the
-            // listener may not be set yet, so the notification would be lost.
             try {
-                nativeBound = initializeNative()
+                task()
             } catch (t: Throwable) {
-                Log.e(logTag, "Native initialization failed", t)
+                Log.e(TAG, "Native task failed: $what", t)
             }
         }
     }
@@ -100,7 +128,7 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
         // Re-arm from a previous session's terminal state. Safe: the session's reader thread has
         // exited by then (its terminal notice is that thread's last act; native start/stop also
         // join it before spawning a new one), so no write can land after this settle.
-        settleTerminalState()
+        state.compareAndSet(SessionState.TERMINAL, SessionState.IDLE)
 
         beforeStartNative()?.let { error ->
             Log.e(logTag, error)
@@ -108,17 +136,29 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
             return false
         }
 
-        val result = startNative()
-        if (result) {
+        val result = try {
+            startNative()
+        } catch (t: Throwable) {
+            // The postlude below only runs on a returned result: a JNI-boundary throwable here
+            // would skip it and leak the resources acquired in beforeStartNative (the player's
+            // audio focus) — release them and re-raise
+            onSessionTerminated()
+            throw t
+        }
+        return if (result) {
             // The native true return IS the started signal (synchronous, same executor thread —
             // no separate started callback to lose). A terminal notice delivered from a native
             // thread while startNative ran has already moved the state off IDLE: the CAS loses,
             // the late start stays silent, and the terminal notice owns the UI. This atomic
             // transition is the whole race fix — never replace it with a read-then-write.
-            if (state.compareAndSet(SessionState.IDLE, SessionState.ACTIVE)) {
+            val casWon = state.compareAndSet(SessionState.IDLE, SessionState.ACTIVE)
+            if (casWon) {
                 listener?.onStarted()
                 Log.i(logTag, "${sessionLabel.replaceFirstChar { it.uppercase() }} started successfully")
             }
+            // Truthful started signal: a CAS lost to a racing terminal notice means the session
+            // is already dead (the notice owns the UI) — the raw native result would call it started
+            casWon
         } else {
             onSessionTerminated()  // release what beforeStartNative acquired (focus); idempotent
             // A real native failure always delivers onError synchronously (state becomes ERROR before
@@ -127,12 +167,12 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
             if (state.get() == SessionState.IDLE) {
                 listener?.onError("${AAudioConstants.ErrorTypes.STREAM} Native start failed without error callback")
             }
+            result
         }
-        return result
     }
 
     final override fun stop() {
-        // Also entered from ERROR state: cleans up the stream/file/thread left by an error (triggered by Fragment.onError)
+        // Also entered from a terminal state: cleans up the stream/file/thread left by an error (triggered by Fragment.onError)
         if (state.get() == SessionState.IDLE) return
         Log.d(logTag, "Stopping $sessionLabel")
         // True = a stopped/error notice already reached Kotlin natively (latch owned by an async
@@ -145,40 +185,47 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
     }
 
     final override fun release() {
-        if (state.get() == SessionState.ACTIVE) stop()
-        onSessionTerminated()
-        listener = null
         try {
-            releaseNative()
-        } catch (e: Exception) {
-            Log.e(logTag, "Error releasing native resources", e)
+            if (state.get() == SessionState.ACTIVE) stop()
+            listener = null
+        } finally {
+            // Everything here must survive the JNI-boundary throwables above (stop's stopNative is
+            // OOM-able): skipping onSessionTerminated leaks the session's audio focus, skipping
+            // releaseNative leaks the stream/hardware session with the IDLE gate below blocking any
+            // later recovery stop. releaseNative is idempotent over partially-torn native state
+            // (stale-release guard + stream/wav null checks). Errors still propagate to the outer
+            // guard — but reclaimed and settled. Known residual: a synchronous onNativeStopped
+            // delivered by releaseNative's internal stop lands after this settle and leaves
+            // TERMINAL on this dead instance (listener already null; a late stop self-heals
+            // through the gate pass + idempotent native no-op).
+            onSessionTerminated()
+            state.set(SessionState.IDLE)
+            try {
+                releaseNative()
+            } catch (e: Exception) {
+                Log.e(logTag, "Error releasing native resources", e)
+            }
+            Log.d(logTag, "${javaClass.simpleName} resources released")
         }
-        // The instance is dead: settle a leftover terminal state to IDLE so a late queued stop()
-        // (native-thread error racing recreation) hits the IDLE gate instead of touching native
-        // state that may already belong to a newer instance
-        state.set(SessionState.IDLE)
-        Log.d(logTag, "${javaClass.simpleName} resources released")
     }
 
     // Native layer callback (JNI-invoked via the subclass forwarders, native thread): terminal for
-    // this session — a start in flight must lose its CAS and stay silent
+    // this session — a start in flight must lose its CAS and stay silent. Semantics: an error
+    // leaves native state to clean up, surfaced via onError (Fragment.onError queues that cleanup
+    // stop when isActive() is false).
     protected fun onNativeError(error: String) {
-        state.set(SessionState.ERROR)
+        state.set(SessionState.TERMINAL)
         onSessionTerminated()
         listener?.onError(error)
         Log.e(logTag, "${sessionLabel.replaceFirstChar { it.uppercase() }} error: $error")
     }
 
-    // Native layer callback (JNI-invoked; also self-run by stop() on delivery failure)
+    // Native layer callback (JNI-invoked; also self-run by stop() on delivery failure). Semantics:
+    // a stopped/EOF notice means native already tore the session down, surfaced via onStopped.
     protected fun onNativeStopped() {
-        state.set(SessionState.CLOSED)
+        state.set(SessionState.TERMINAL)
         onSessionTerminated()
         listener?.onStopped()
         Log.i(logTag, "${sessionLabel.replaceFirstChar { it.uppercase() }} stopped")
-    }
-
-    private fun settleTerminalState() {
-        state.compareAndSet(SessionState.ERROR, SessionState.IDLE)
-        state.compareAndSet(SessionState.CLOSED, SessionState.IDLE)
     }
 }

@@ -66,7 +66,7 @@ adb logcat -s AAudioPlayer AAudioRecorder
 | `channelCount` | recorder | `1` | channel count |
 | `format` | recorder | `16` | bit depth 16/24/32 |
 | `audioFilePath` | both | empty | playback: empty = built-in source (extracted to private dir), or `/data/xx.wav`; recording: empty = auto-named private dir |
-| `description` | both | `Custom Configuration` | name shown in the Spinner |
+| `description` | both | `Default Configuration` | name shown in the Spinner |
 
 ### Example
 

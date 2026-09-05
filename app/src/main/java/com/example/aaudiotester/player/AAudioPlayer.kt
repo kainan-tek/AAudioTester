@@ -29,8 +29,13 @@ class AAudioPlayer(context: Context, nativeExecutor: Executor) :
 
     private val appContext = context.applicationContext
     private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    private var currentConfig: AAudioConfig = AAudioConfig()
+
+    @Volatile
     private var audioFocusRequest: AudioFocusRequest? = null
+    // Written on the executor (requestAudioFocus in start) and abandoned from native worker threads
+    // (onSessionTerminated via the terminal-notice callbacks) with no happens-between edge — a plain
+    // var is a JMM data race across that boundary. A stale session's abandon can still observe the
+    // NEXT session's request (single-field design; inherent edge, narrowed by the start CAS).
 
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
@@ -38,17 +43,10 @@ class AAudioPlayer(context: Context, nativeExecutor: Executor) :
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 Log.d(TAG, "Audio focus lost, stopping playback")
-                // Focus callbacks arrive on the main thread: serialized with other native calls via the shared executor
-                // Same Throwable guard as the Fragment's onEngineThread: a stop that throws must degrade to a
-                // retryable stuck session (the user can press Stop again), not kill the process. No listener
+                // Focus callbacks arrive on the main thread: serialized with other native calls via the shared executor.
+                // A failed stop degrades to a retryable stuck session (the user can press Stop again) — no listener
                 // notice: onError would disable the Stop button while the session is still active.
-                nativeExecutor.execute {
-                    try {
-                        stop()
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "Focus-loss stop failed", t)
-                    }
-                }
+                executeGuarded("focus-loss stop") { stop() }
             }
         }
     }
@@ -78,11 +76,7 @@ class AAudioPlayer(context: Context, nativeExecutor: Executor) :
             AAudioConstants.getSharingMode(config.sharingMode),
             resolvePath(config)
         )
-        if (applied) {
-            currentConfig = config
-        } else {
-            Log.w(TAG, "Native rejected configuration, keeping previous")
-        }
+        onConfigApplied(config, applied)
     }
 
     override fun beforeStartNative(): String? {
@@ -138,10 +132,10 @@ class AAudioPlayer(context: Context, nativeExecutor: Executor) :
     }
 
     // Native methods (JNI binds by this class's name; the base's protocol hooks route here)
-    protected external override fun initializeNative(): Boolean
-    protected external override fun startNative(): Boolean
-    protected external override fun stopNative(): Boolean
-    protected external override fun releaseNative()
+    external override fun initializeNative(): Boolean
+    external override fun startNative(): Boolean
+    external override fun stopNative(): Boolean
+    external override fun releaseNative()
 
     private external fun setNativeConfig(
         usage: Int, contentType: Int, performanceMode: Int, sharingMode: Int, filePath: String
