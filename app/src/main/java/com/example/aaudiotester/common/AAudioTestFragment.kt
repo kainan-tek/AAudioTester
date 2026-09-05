@@ -112,13 +112,21 @@ abstract class AAudioTestFragment : Fragment() {
             }
             override fun onError(error: String) {
                 // Actively clean up leftover resources after an error (stop can be entered from ERROR state: close stream, join threads, backfill WAV header);
-                // skip cleanup while the session is still healthy (e.g. "Already active" notice)
+                // skip cleanup while the session is still healthy (e.g. "Already active" notice).
+                // Double-check at execution time: the decision was sampled on this worker thread,
+                // and the enqueue races any fresh start across threads (FIFO orders each thread's
+                // tasks but not the two threads against each other) — a stale cleanup stop landing
+                // after a new session's start would silently kill it
                 if (!engine.isActive()) {
-                    onEngineThread { engine.stop() }
+                    onEngineThread { if (!engine.isActive()) engine.stop() }
                 }
+                // Truthful buttons (same rationale as onEngineThread's catch): an "Already active"
+                // rejection arrives while the session is live — updateButtons(false) would disable
+                // Stop over it
+                val active = engine.isActive()
                 activity?.runOnUiThread {
                     if (!isAdded) return@runOnUiThread
-                    updateButtons(false); showError(error)
+                    updateButtons(active); showError(error)
                 }
             }
         })
@@ -167,9 +175,13 @@ abstract class AAudioTestFragment : Fragment() {
                 task()
             } catch (t: Throwable) {
                 Log.e(TAG, "Engine task crashed", t)
+                // Decide on the engine thread where the state is freshest: an Error escaping a
+                // stop() of a still-running session must leave Stop enabled (retryable), not fake
+                // a stopped session
+                val active = engine.isActive()
                 activity?.runOnUiThread {
                     if (!isAdded) return@runOnUiThread
-                    updateButtons(false)
+                    updateButtons(active)
                     showError("Internal error: ${t.javaClass.simpleName}")
                 }
             }
