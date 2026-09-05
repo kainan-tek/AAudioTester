@@ -180,7 +180,7 @@ struct JavaNotifier {
     jobject instance = nullptr;
     jmethodID stopped_method = nullptr;
     jmethodID error_method = nullptr;
-    std::atomic<bool> notified{false};  // claimed ⇔ some notice was successfully delivered (until the next start resets it)
+    std::atomic<bool> notified{false};  // claimed ⇔ a notice was delivered, or a stop-path delivery failed and left it claimed (both reset by the next start)
 
     // initializeNative: rebind to a fresh fragment instance (delete old global ref → new ref →
     // method IDs). Returns false on failure with the binding fully cleared.
