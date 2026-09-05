@@ -21,14 +21,28 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.fragment.app.Fragment
 import com.example.aaudiotester.R
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
-import java.util.concurrent.RejectedExecutionException
 
 /**
  * Abstract base class: shares all UI wiring (status/buttons/Spinner/info area/permissions/exclusivity).
  */
 abstract class AAudioTestFragment : Fragment() {
+
+    companion object {
+        // One FIFO thread per section: each engine's native global is a process-wide singleton, so
+        // its own old/new fragment instances must serialize on one thread — an old instance's
+        // stop/release completes before the new instance's initialize/config/start. But g_player and
+        // g_recorder are independent, so the two engines must not queue behind each other (one
+        // engine's slow teardown would otherwise delay the other's start). The only cross-engine
+        // shared resource (AssetExtractor) is @Synchronized. Intentionally never shut down: threads
+        // live for the process lifetime.
+        private val sectionExecutors = ConcurrentHashMap<String, Executor>()
+
+        fun executorFor(section: String): Executor =
+            sectionExecutors.getOrPut(section) { Executors.newSingleThreadExecutor() }
+    }
 
     protected abstract fun createEngine(context: Context, engineExecutor: Executor): AAudioEngine
     protected abstract val section: String                       // "player" / "recorder"
@@ -38,10 +52,8 @@ abstract class AAudioTestFragment : Fragment() {
     protected abstract fun friendlyErrorMessage(raw: String): String
 
     private lateinit var engine: AAudioEngine
+    private lateinit var engineExecutor: Executor  // this section's dedicated FIFO thread
 
-    // The native layer is a global singleton: all native-touching calls (setAudioConfig/start/stop/release)
-    // are serialized through this single-threaded executor, eliminating races and avoiding main-thread blocking
-    private val engineExecutor = Executors.newSingleThreadExecutor()
     private lateinit var statusText: TextView
     private lateinit var infoText: TextView
     private lateinit var startButton: Button
@@ -80,6 +92,7 @@ abstract class AAudioTestFragment : Fragment() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // The engine is bound to the Fragment lifecycle: view recreation doesn't swap instances, so native global state never overlaps between old/new instances
+        engineExecutor = executorFor(section)
         engine = createEngine(requireActivity().applicationContext, engineExecutor)
         engine.setListener(object : AAudioEngine.Listener {
             override fun onStarted() {
@@ -98,11 +111,7 @@ abstract class AAudioTestFragment : Fragment() {
                 // Actively clean up leftover resources after an error (stop can be entered from ERROR state: close stream, join threads, backfill WAV header);
                 // skip cleanup while the session is still healthy (e.g. "Already active" notice)
                 if (!engine.isActive()) {
-                    try {
-                        engineExecutor.execute { engine.stop() }
-                    } catch (_: RejectedExecutionException) {
-                        // Lost the race with onDestroy's shutdown: release() already did everything stop() would
-                    }
+                    engineExecutor.execute { engine.stop() }
                 }
                 activity?.runOnUiThread {
                     if (!isAdded) return@runOnUiThread
@@ -131,12 +140,13 @@ abstract class AAudioTestFragment : Fragment() {
         }
         stopButton.setOnClickListener { engineExecutor.execute { engine.stop() } }
         configSpinner.setOnLongClickListener {
-            reloadConfigurations()
+            loadConfigurations(reload = true)
             true
         }
 
-        loadConfigurations()
+        // Buttons first: the initial zero-config load disables Start, which must not be overwritten back to enabled
         updateButtons(false)
+        loadConfigurations()
         return root
     }
 
@@ -147,38 +157,34 @@ abstract class AAudioTestFragment : Fragment() {
         }
         statusText.text = messages.preparing
         startButton.isEnabled = false  // prevent double-taps; button state is restored by onStarted/onError callbacks
+        // Lock the config too: native is busy mid-start until onStarted arrives, so a switch here
+        // would be silently rejected by the engine (configSpinner stays locked in updateButtons(true))
+        configSpinner.isEnabled = false
         engineExecutor.execute { engine.start() }
     }
 
-    private fun loadConfigurations() {
-        availableConfigs = AAudioConfig.loadConfigs(requireContext(), section)
-        if (availableConfigs.isNotEmpty()) {
-            currentConfig = availableConfigs[0]
-            engineExecutor.execute { engine.setAudioConfig(currentConfig!!) }
-            setupSpinner()
-            updateInfo()
-            statusText.text = messages.ready
-        } else {
+    private fun loadConfigurations(reload: Boolean = false) {
+        // A reload that finds nothing keeps the old list/adapter/selection intact: the last applied config still
+        // works, and clearing here would leave the spinner adapter populated while availableConfigs is empty (crash on next tap)
+        val loaded = AAudioConfig.loadConfigs(requireContext(), section)
+        if (loaded.isEmpty()) {
+            if (reload) toast("No valid configurations found") else startButton.isEnabled = false
             statusText.text = messages.failed
-            startButton.isEnabled = false
+            return
         }
-    }
-
-    private fun reloadConfigurations() {
         // Restore by selected position rather than description: descriptions may repeat (custom configs), and position matches the UI selection state naturally
         val prevPosition = configSpinner.selectedItemPosition
-        availableConfigs = AAudioConfig.loadConfigs(requireContext(), section)
-        if (availableConfigs.isNotEmpty()) {
-            currentConfig = availableConfigs.getOrNull(prevPosition) ?: availableConfigs[0]
-            engineExecutor.execute { engine.setAudioConfig(currentConfig!!) }
-            setupSpinner()
-            updateInfo()
-            toast("Configuration reloaded successfully")
-            statusText.text = messages.ready
+        availableConfigs = loaded
+        currentConfig = if (reload) {
+            availableConfigs.getOrNull(prevPosition) ?: availableConfigs[0]
         } else {
-            toast("No valid configurations found")
-            statusText.text = messages.failed
+            availableConfigs[0]
         }
+        engineExecutor.execute { engine.setAudioConfig(currentConfig!!) }
+        setupSpinner()
+        updateInfo()
+        if (reload) toast("Configuration reloaded successfully")
+        statusText.text = messages.ready
     }
 
     private fun setupSpinner() {
@@ -251,16 +257,9 @@ abstract class AAudioTestFragment : Fragment() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // FIFO: queued after any in-flight stop, native resources (GlobalRef etc.) are eventually released;
-        // release shuts down the executor itself when done — async callbacks arriving meanwhile (onError/focus loss) are still
-        // accepted and safely executed, not interrupted by RejectedExecutionException (stop after release is a no-op)
-        engineExecutor.execute {
-            try {
-                engine.release()
-            } finally {
-                engineExecutor.shutdown()
-            }
-        }
+        // FIFO on the shared executor: release runs after any queued stop; the executor itself is
+        // process-wide and stays alive for the next fragment instance
+        engineExecutor.execute { engine.release() }
     }
 }
 

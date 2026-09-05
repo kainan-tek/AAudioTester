@@ -19,9 +19,8 @@ class RecorderFragment : AAudioTestFragment() {
         failed = "Recording failed",
     )
 
-    // The recorder has no audio focus listener, so no executor is needed
     override fun createEngine(context: Context, engineExecutor: Executor): AAudioEngine =
-        AAudioRecorder(context)
+        AAudioRecorder(context, engineExecutor)
 
     override fun requiredPermissions(): Array<String> = arrayOf(Manifest.permission.RECORD_AUDIO)
 
@@ -34,6 +33,9 @@ class RecorderFragment : AAudioTestFragment() {
     }
 
     override fun friendlyErrorMessage(raw: String): String = when {
+        // Must precede the generic [FILE] branch, whose prefix would otherwise swallow this
+        raw.startsWith("[FILE] Recording incomplete", ignoreCase = true) ->
+            "The recording is incomplete: saving stopped early (storage error or 4GB WAV limit). The saved part is a valid WAV file."
         raw.startsWith("[FILE]", ignoreCase = true) ->
             "Unable to create recording file. Please check storage permissions and available space."
         raw.startsWith("[STREAM]", ignoreCase = true) ->

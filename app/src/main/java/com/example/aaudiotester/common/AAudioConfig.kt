@@ -56,7 +56,7 @@ data class AAudioConfig(
                         performanceMode = c.childText("performanceMode", DEFAULT.performanceMode),
                         sharingMode = c.childText("sharingMode", DEFAULT.sharingMode),
                         audioFilePath = c.childText("audioFilePath", DEFAULT.audioFilePath),
-                        description = c.childText("description", "Custom Configuration"),
+                        description = c.childText("description", DEFAULT.description),
                     )
                 }.onFailure {
                     Log.e(TAG, "Skipping invalid $section config entry #$i", it)

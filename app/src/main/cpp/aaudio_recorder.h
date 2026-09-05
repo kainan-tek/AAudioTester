@@ -7,7 +7,6 @@
 
 // Log tags
 #define LOG_TAG "AAudioRecorder"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -72,9 +71,8 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
  * Stop audio recording
  * @param env JNI environment
  * @param thiz Java object instance
- * @return JNI_TRUE if recording stopped successfully, JNI_FALSE otherwise
  */
-JNIEXPORT jboolean JNICALL
+JNIEXPORT void JNICALL
 Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv *env,
                                                                           jobject thiz);
 

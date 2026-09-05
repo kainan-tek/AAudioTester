@@ -10,7 +10,6 @@ import com.example.aaudiotester.common.AAudioConstants
 import com.example.aaudiotester.common.AAudioEngine
 import com.example.aaudiotester.common.AssetExtractor
 import java.util.concurrent.Executor
-import java.util.concurrent.RejectedExecutionException
 
 /** Playback engine: AAudio output + audio focus management. */
 class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAudioEngine {
@@ -46,18 +45,16 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 Log.d(TAG, "Audio focus lost, stopping playback")
-                // Focus callbacks arrive on the main thread: serialized with other native calls via the executor to avoid concurrent entry into stopNativePlayback
-                try {
-                    nativeExecutor.execute { stop() }
-                } catch (_: RejectedExecutionException) {
-                    // Lost the race with onDestroy's shutdown: release() already abandoned focus and stopped
-                }
+                // Focus callbacks arrive on the main thread: serialized with other native calls via the shared executor
+                nativeExecutor.execute { stop() }
             }
         }
     }
 
     init {
-        nativeBound = initializeNative()
+        // Bind on the shared executor, not the constructing (main) thread: every native entry stays
+        // FIFO-ordered, so a rotation rebuild's initialize runs after the old instance's stop/release
+        nativeExecutor.execute { nativeBound = initializeNative() }
     }
 
     /** Binding is retryable: on rotation rebuild an unstopped old session can fail the first bind; rebind at start (native is idempotent, repeated calls are safe) */
@@ -66,8 +63,8 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
         return nativeBound
     }
 
-    private fun resolveCurrentPath(): String {
-        val path = currentConfig.audioFilePath.ifBlank { AAudioConstants.DEFAULT_ASSET }
+    private fun resolvePath(config: AAudioConfig): String {
+        val path = config.audioFilePath.ifBlank { AAudioConstants.DEFAULT_ASSET }
         return try {
             AssetExtractor.resolveAssetPath(appContext, path)
         } catch (e: Exception) {
@@ -85,14 +82,21 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
             Log.w(TAG, "Cannot change configuration while playing")
             return
         }
-        currentConfig = config
-        setNativeConfig(
+        // Native is the source of truth: a rejected config must not update currentConfig, or start
+        // would use parameters that were never applied. Rejection is defensive — the UI locks the
+        // spinner across the whole busy window, so no switch can be in flight; expect true here.
+        val applied = setNativeConfig(
             AAudioConstants.getUsage(config.usage),
             AAudioConstants.getContentType(config.contentType),
             AAudioConstants.getPerformanceMode(config.performanceMode),
             AAudioConstants.getSharingMode(config.sharingMode),
-            resolveCurrentPath()
+            resolvePath(config)
         )
+        if (applied) {
+            currentConfig = config
+        } else {
+            Log.w(TAG, "Native rejected configuration, keeping previous")
+        }
     }
 
     override fun start(): Boolean {
@@ -110,7 +114,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
         if (state == State.ERROR) state = State.IDLE
         errored = false  // reset for a new session
 
-        val audioPath = resolveCurrentPath()
+        val audioPath = resolvePath(currentConfig)
         if (audioPath.isBlank() || !audioPath.lowercase().endsWith(".wav")) {
             val error = "${AAudioConstants.ErrorTypes.PARAM} Invalid audio file path: must end with .wav"
             Log.e(TAG, error)
@@ -125,7 +129,15 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
         }
 
         val result = startNativePlayback()
-        if (!result) abandonAudioFocus()
+        if (!result) {
+            abandonAudioFocus()
+            // A real native failure always delivers onError synchronously (state becomes ERROR before
+            // this returns). state still IDLE here means native returned false without notifying —
+            // the cross-language contract is broken; recover the UI instead of sticking it forever
+            if (state == State.IDLE) {
+                listener?.onError("${AAudioConstants.ErrorTypes.STREAM} Native start failed without error callback")
+            }
+        }
         return result
     }
 
@@ -148,6 +160,10 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
         } catch (e: Exception) {
             Log.e(TAG, "Error releasing native resources", e)
         }
+        // The instance is dead: settle a leftover ERROR state to IDLE so a late queued stop()
+        // (native-thread error racing recreation) hits the IDLE gate instead of touching native
+        // state that may already belong to a newer instance
+        state = State.IDLE
         Log.d(TAG, "AAudioPlayer resources released")
     }
 
@@ -193,7 +209,7 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
         usage: Int, contentType: Int, performanceMode: Int, sharingMode: Int, filePath: String
     ): Boolean
     private external fun startNativePlayback(): Boolean
-    private external fun stopNativePlayback(): Boolean
+    private external fun stopNativePlayback()
     private external fun releaseNative()
 
     // Native layer callbacks

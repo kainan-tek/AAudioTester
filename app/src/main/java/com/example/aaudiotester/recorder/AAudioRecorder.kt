@@ -5,9 +5,10 @@ import android.util.Log
 import com.example.aaudiotester.common.AAudioConfig
 import com.example.aaudiotester.common.AAudioConstants
 import com.example.aaudiotester.common.AAudioEngine
+import java.util.concurrent.Executor
 
 /** Recording engine: AAudio input + WAV writing. */
-class AAudioRecorder(context: Context) : AAudioEngine {
+class AAudioRecorder(context: Context, private val nativeExecutor: Executor) : AAudioEngine {
 
     companion object {
         private const val TAG = "AAudioRecorder"
@@ -33,7 +34,9 @@ class AAudioRecorder(context: Context) : AAudioEngine {
     private var nativeBound = false  // initializeNative may fail on rotation rebuild if the old session hasn't stopped; retried at start
 
     init {
-        nativeBound = initializeNative()
+        // Bind on the shared executor, not the constructing (main) thread: every native entry stays
+        // FIFO-ordered, so a rotation rebuild's initialize runs after the old instance's stop/release
+        nativeExecutor.execute { nativeBound = initializeNative() }
     }
 
     /** Binding is retryable: on rotation rebuild an unstopped old session can fail the first bind; rebind at start (native is idempotent, repeated calls are safe) */
@@ -51,10 +54,12 @@ class AAudioRecorder(context: Context) : AAudioEngine {
             Log.w(TAG, "Cannot change configuration while recording")
             return
         }
-        currentConfig = config
         // Paths not ending in .wav are treated as directories by the native layer, which auto-generates a filename; invalid paths report a [FILE] error at start
         val audioFilePath = config.audioFilePath.ifBlank { getDefaultDirectory() }
-        setNativeConfig(
+        // Native is the source of truth: a rejected config must not update currentConfig, or start
+        // would use parameters that were never applied. Rejection is defensive — the UI locks the
+        // spinner across the whole busy window, so no switch can be in flight; expect true here.
+        val applied = setNativeConfig(
             AAudioConstants.getInputPreset(config.inputPreset),
             config.sampleRate,
             config.channelCount,
@@ -63,6 +68,11 @@ class AAudioRecorder(context: Context) : AAudioEngine {
             AAudioConstants.getSharingMode(config.sharingMode),
             audioFilePath
         )
+        if (applied) {
+            currentConfig = config
+        } else {
+            Log.w(TAG, "Native rejected configuration, keeping previous")
+        }
     }
 
     override fun start(): Boolean {
@@ -99,7 +109,14 @@ class AAudioRecorder(context: Context) : AAudioEngine {
             return false
         }
 
-        return startNativeRecording()
+        val result = startNativeRecording()
+        // A real native failure always delivers onError synchronously (state becomes ERROR before
+        // this returns). state still IDLE here means native returned false without notifying —
+        // the cross-language contract is broken; recover the UI instead of sticking it forever
+        if (!result && state == State.IDLE) {
+            listener?.onError("${AAudioConstants.ErrorTypes.STREAM} Native start failed without error callback")
+        }
+        return result
     }
 
     override fun stop() {
@@ -120,6 +137,10 @@ class AAudioRecorder(context: Context) : AAudioEngine {
         } catch (e: Exception) {
             Log.e(TAG, "Error releasing native resources", e)
         }
+        // The instance is dead: settle a leftover ERROR state to IDLE so a late queued stop()
+        // (native-thread error racing recreation) hits the IDLE gate instead of touching native
+        // state that may already belong to a newer instance
+        state = State.IDLE
         Log.d(TAG, "AAudioRecorder resources released")
     }
 
@@ -135,7 +156,7 @@ class AAudioRecorder(context: Context) : AAudioEngine {
         performanceMode: Int, sharingMode: Int, audioFilePath: String
     ): Boolean
     private external fun startNativeRecording(): Boolean
-    private external fun stopNativeRecording(): Boolean
+    private external fun stopNativeRecording()
     private external fun releaseNative()
 
     // Native layer callbacks

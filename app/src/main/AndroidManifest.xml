@@ -3,7 +3,11 @@
     xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Unused by the documented asset:// and /data paths: these two cover playback of a WAV
+         from shared storage (/sdcard) via audioFilePath. Effective on API 32 devices only —
+         with the implicit targetSdk 32 (minSdk, no override) and maxSdkVersion="32" below,
+         Android 13+ grants neither; covering API 33+ needs a targetSdk bump or dropping
+         maxSdkVersion (product decision, not a cleanup). -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"

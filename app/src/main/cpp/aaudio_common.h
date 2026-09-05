@@ -1,7 +1,8 @@
 #pragma once
 //
 // Shared infrastructure and common audio logic for player/recorder (single source of truth).
-// All are stateless inline functions/RAII, so there is no ODR risk.
+// All are inline definitions (the only stateful one, RtErrorSlot, is instantiated inside the
+// engines' file-static state structs), so there is no ODR risk.
 //
 
 #include <jni.h>
@@ -10,8 +11,8 @@
 #include <android/log.h>
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
-#include <mutex>
 #include <string>
 
 #ifndef AAC_LOG_TAG
@@ -29,6 +30,32 @@ struct AAudioStreamDeleter {
     }
 };
 using AAudioStreamPtr = std::unique_ptr<AAudioStream, AAudioStreamDeleter>;
+
+// Terminal-error slot for RT→worker delivery (one per engine): the RT callback publishes a static
+// literal, or a message composed into buf (no heap on the RT thread); the worker thread takes it
+// on a non-RT thread and delivers it to Java. errorCallback fires at most once per stream, so buf
+// has a single writer (data-callback branches publish literals only, never touching buf);
+// publish()'s release-store happens-after the buffer write, and take()'s acquire-load makes the
+// buffer contents visible before the message is read.
+struct RtErrorSlot {
+    std::atomic<const char*> msg{nullptr};
+    char buf[128] = {};
+
+    // RT side: publish a static literal or a message written into buf
+    void publish(const char* text) { msg.store(text, std::memory_order_release); }
+    // Worker side: non-consuming check (loop conditions)
+    bool pending() const { return msg.load(std::memory_order_acquire) != nullptr; }
+    // Worker side: take the pending message (nullptr if none), leaving the slot empty
+    const char* take() {
+        const char* m = msg.load(std::memory_order_acquire);
+        if (m) {
+            msg.store(nullptr, std::memory_order_release);
+        }
+        return m;
+    }
+    // Start path: drop a leftover message from the previous session's final in-flight callback
+    void clear() { msg.store(nullptr, std::memory_order_release); }
+};
 
 // RAII helper: attach current thread to JVM if needed, detach on destruction
 struct JniThreadAttachment {
@@ -53,19 +80,12 @@ struct JniThreadAttachment {
     [[nodiscard]] bool ok() const { return env != nullptr; }
 };
 
-// Guards binding/releasing of the global JNI references (player_instance/recorder_instance).
-// initializeNative runs on the main thread while releaseNative runs on the old executor thread;
-// interleaving could double-release a global reference; locking the control path is near zero cost.
-inline std::mutex& jniBindMutex() {
-    static std::mutex m;
-    return m;
-}
-
 // JNI binding boilerplate: replaces the instance global reference and returns its class
 // (cleans up the reference and returns nullptr on failure).
 // Shared by initializeNative of both player/recorder (delete old ref if non-null → NewGlobalRef → GetObjectClass).
+// No lock: every bind/release caller runs on the shared Kotlin executor thread (see callVoidMethod
+// below for why the instance reads from other threads are still safe).
 inline jclass bindJavaInstance(JNIEnv* env, jobject thiz, jobject& instance, const char* what) {
-    std::lock_guard<std::mutex> lock(jniBindMutex());
     if (instance) {
         env->DeleteGlobalRef(instance);
         instance = nullptr;
@@ -84,35 +104,64 @@ inline jclass bindJavaInstance(JNIEnv* env, jobject thiz, jobject& instance, con
     return clazz;
 }
 
-// No-arg callback notification: null-check JNI refs + attach + CallVoidMethod
-inline void callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, const char* name) {
+// No-arg callback notification: null-check JNI refs + attach + CallVoidMethod.
+// Returns false when the notification was NOT delivered (references unset, thread attach failed)
+// so latch-consuming callers can release the latch — symmetric with notifyErrorToJava below.
+// Lock-free: all bind/release runs on the shared Kotlin executor thread, and the instance read
+// below cannot race it: initializeNative joins any leftover reader/writer worker BEFORE
+// rebinding (hard join-before-rebind invariant — a worker's late notifications always run
+// against the binding they were created under), AAudioStream_close joins in-flight callbacks,
+// and a released engine's late stop() is dropped by the IDLE gate set at the end of release().
+// A listener exception after CallVoidMethod still counts as delivered (returns true).
+inline bool callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, const char* name) {
     if (!jvm || !instance || !method) {
         AAC_LOGW("Cannot notify %s: JNI references not set", name);
-        return;
+        return false;
     }
     JniThreadAttachment attach(jvm);
     if (!attach.ok()) {
         AAC_LOGW("Failed to attach thread for JNI callback");
-        return;
+        return false;
     }
     attach.env->CallVoidMethod(instance, method);
+    if (attach.env->ExceptionCheck()) {
+        // A throwing listener must not leave a pending exception across DetachCurrentThread
+        AAC_LOGW("Java listener threw in %s notification (exception cleared)", name);
+        attach.env->ExceptionClear();
+    }
+    return true;
 }
 
-// Error callback notification with a string argument
-inline void notifyErrorToJava(JavaVM* jvm, jobject instance, jmethodID method, const std::string& error,
+// Error callback notification with a string argument.
+// Returns false when the notification was NOT delivered (references unset, thread attach failed, or string
+// creation failed) so the caller can release its dedup latch — a lost notification must not also consume the
+// right to notify. A listener exception after CallVoidMethod still counts as delivered (returns true).
+inline bool notifyErrorToJava(JavaVM* jvm, jobject instance, jmethodID method, const std::string& error,
                               const char* name) {
     if (!jvm || !instance || !method) {
         AAC_LOGW("Cannot notify %s: JNI references not set", name);
-        return;
+        return false;
     }
     JniThreadAttachment attach(jvm);
     if (!attach.ok()) {
         AAC_LOGW("Failed to attach thread for JNI callback");
-        return;
+        return false;
     }
     jstring error_str = attach.env->NewStringUTF(error.c_str());
+    if (!error_str) {
+        // Delivering null would NPE the Kotlin listener; abandon this notification instead
+        AAC_LOGW("Failed to create error string for %s notification", name);
+        attach.env->ExceptionClear();  // NewStringUTF leaves an OutOfMemoryError pending
+        return false;
+    }
     attach.env->CallVoidMethod(instance, method, error_str);
     attach.env->DeleteLocalRef(error_str);
+    if (attach.env->ExceptionCheck()) {
+        // Same as callVoidMethod: never detach with a pending exception
+        AAC_LOGW("Java listener threw in %s notification (exception cleared)", name);
+        attach.env->ExceptionClear();
+    }
+    return true;
 }
 
 // format → bytes per sample (unknown formats treated as 16-bit)

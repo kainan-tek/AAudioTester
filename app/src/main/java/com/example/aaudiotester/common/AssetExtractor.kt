@@ -40,8 +40,14 @@ object AssetExtractor {
             context.assets.open(assetPath).use { input ->
                 tmp.outputStream().use { output -> input.copyTo(output) }
             }
-            if (!tmp.renameTo(target)) tmp.delete() // rare cases like the target already existing: remove leftovers and reuse the existing target
-            Log.i(TAG, "Extracted asset $assetPath -> ${target.absolutePath}")
+            if (tmp.renameTo(target)) {
+                Log.i(TAG, "Extracted asset $assetPath -> ${target.absolutePath}")
+            } else {
+                // Rare failure (target is a directory, cross-filesystem, I/O error): remove leftovers
+                // and fall through to the existing target — but say so, a success log here would mislead debugging
+                tmp.delete()
+                Log.w(TAG, "Rename failed, reusing existing target for $assetPath")
+            }
         }
         return target.absolutePath
     }

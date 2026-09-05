@@ -14,7 +14,8 @@
 // Unified WAV file class: read by player + write by recorder.
 class WavFile {
 public:
-    WavFile();
+    // Defaulted: all members have initializers; must stay declared because the deleted move ctor suppresses the implicit one
+    WavFile() = default;
     ~WavFile() noexcept;
     WavFile(const WavFile&) = delete;
     WavFile& operator=(const WavFile&) = delete;
@@ -36,6 +37,10 @@ public:
     bool openWrite(const std::string& filePath, int32_t sampleRate,
                    int32_t channelCount, aaudio_format_t format);
     bool writeData(const void* data, size_t size);
+    // Write side: saving stopped early (I/O failure or 4GB WAV limit; mutually exclusive) —
+    // the file is valid but incomplete. Session-outcome flag: initialized by openWrite, survives
+    // close() so it can be read after finalizing (same lifetime as the read side's hasReadError).
+    [[nodiscard]] bool hasTruncatedWrite() const { return truncated_; }
 
     // Common
     bool isOpen() const;
@@ -69,6 +74,7 @@ private:
     uint32_t data_size_ = 0;
     size_t remaining_data_ = 0;
     bool read_error_ = false;
+    bool truncated_ = false;
     aaudio_format_t write_format_ = AAUDIO_FORMAT_PCM_I16;
 
     // Read helpers
@@ -78,7 +84,7 @@ private:
     bool findDataChunk();
     void skipChunk(uint32_t chunk_size);
     // Write helpers
-    void writeHeader(uint32_t data_size);
+    bool writeHeader(uint32_t data_size);
 };
 
 #endif  // AAUDIOTESTER_WAV_FILE_H_

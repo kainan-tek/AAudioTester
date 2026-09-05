@@ -45,10 +45,9 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
  * Stop audio playback
  * @param env JNI environment
  * @param thiz Java object instance
- * @return JNI_TRUE if playback stopped successfully
  */
-JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(JNIEnv* env,
-                                                                                                jobject thiz);
+JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(JNIEnv* env,
+                                                                                            jobject thiz);
 
 /**
  * Release audio player resources

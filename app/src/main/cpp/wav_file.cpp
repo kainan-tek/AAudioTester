@@ -1,5 +1,6 @@
 #include "wav_file.h"
 
+#include <cstdio>
 #include <limits>
 #include <sstream>
 #include <cstring>
@@ -10,7 +11,6 @@
 
 // Logging macros are defined only in this .cpp (not in the header, to avoid conflict with player/recorder LOG_TAG)
 #define LOG_TAG "AAudioWavFile"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -23,8 +23,6 @@ constexpr uint16_t kWaveFormatExtensible = 0xFFFE;
 constexpr uint32_t kUnknownDataSize = 0xFFFFFFFF;
 
 }  // namespace
-
-WavFile::WavFile() : is_open_(false), data_size_(0) {}
 
 WavFile::~WavFile() noexcept {
     close();
@@ -104,6 +102,7 @@ bool WavFile::openWrite(const std::string& filePath, int32_t sampleRate,
     header_.num_channels = static_cast<uint16_t>(channelCount);
     header_.bits_per_sample = static_cast<uint16_t>(aaudio_common::bytesPerSample(format) * 8);
     data_size_ = 0;
+    truncated_ = false;
 
     out_.open(filePath, std::ios::binary | std::ios::out | std::ios::trunc);
     if (!out_.is_open()) {
@@ -111,7 +110,14 @@ bool WavFile::openWrite(const std::string& filePath, int32_t sampleRate,
         return false;
     }
 
-    writeHeader(0);
+    if (!writeHeader(0)) {
+        // Initial header write failed (disk full / I/O error): report as a file-creation failure,
+        // not a mid-recording failure — the file never reached a valid state, so remove the leftover
+        LOGE("Failed to write WAV header: %s", filePath.c_str());
+        out_.close();
+        std::remove(filePath.c_str());
+        return false;
+    }
     is_open_ = true;
     LOGI("WAV file opened for writing: %s, %dHz, %dch, %dbit", filePath.c_str(),
          sampleRate, channelCount, header_.bits_per_sample);
@@ -129,11 +135,13 @@ bool WavFile::writeData(const void* data, size_t size) {
     // Reserve 36 bytes for the header so close()'s "36 + data_size" RIFF size backfill cannot wrap either.
     if (static_cast<uint64_t>(data_size_) + size > std::numeric_limits<uint32_t>::max() - 36) {
         LOGE("Data size exceeds 4GB WAV limit, refusing write (file finalized at limit)");
+        truncated_ = true;
         return false;
     }
     out_.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
     if (out_.fail()) {
         LOGE("Failed to write data to WAV file");
+        truncated_ = true;
         return false;
     }
     data_size_ += static_cast<uint32_t>(size);
@@ -143,8 +151,10 @@ bool WavFile::writeData(const void* data, size_t size) {
 bool WavFile::close() {
     bool ok = true;
     if (out_.is_open()) {
-        writeHeader(data_size_);
-        ok = !out_.fail();
+        // Salvage: a latched write failure must not block the header backfill — data_size_ counts
+        // only saved bytes, so the recovered file is valid up to the failure point
+        out_.clear();
+        ok = writeHeader(data_size_);
         out_.close();
         ok = ok && !out_.fail();
         if (ok) {
@@ -262,7 +272,6 @@ bool WavFile::readFmtChunk() {
                 LOGE("Invalid fmt chunk size: %u", chunk_size);
                 return false;
             }
-            strncpy(header_.subchunk1_id, chunk_id, 4);
             in_.read(reinterpret_cast<char*>(&header_.audio_format), 2);
             in_.read(reinterpret_cast<char*>(&header_.num_channels), 2);
             in_.read(reinterpret_cast<char*>(&header_.sample_rate), 4);
@@ -315,7 +324,6 @@ bool WavFile::findDataChunk() {
         }
 
         if (strncmp(chunk_id, "data", 4) == 0) {
-            strncpy(header_.subchunk2_id, chunk_id, 4);
             header_.subchunk2_size = chunk_size;
             return true;
         } else {
@@ -342,9 +350,9 @@ void WavFile::skipChunk(uint32_t chunk_size) {
     }
 }
 
-void WavFile::writeHeader(uint32_t data_size) {
+bool WavFile::writeHeader(uint32_t data_size) {
     if (!out_.is_open()) {
-        return;
+        return false;
     }
     WavHeader header = {};
     memcpy(header.chunk_id, "RIFF", 4);
@@ -364,4 +372,5 @@ void WavFile::writeHeader(uint32_t data_size) {
     out_.seekp(0, std::ios::beg);
     out_.write(reinterpret_cast<const char*>(&header), sizeof(header));
     out_.flush();
+    return !out_.fail();
 }

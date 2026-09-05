@@ -93,7 +93,7 @@ class AAudioConfigTest {
         assertEquals("AAUDIO_USAGE_GAME", c.usage)
         assertEquals("AAUDIO_CONTENT_TYPE_MUSIC", c.contentType)  // omitted → default
         assertEquals(48000, c.sampleRate)
-        assertEquals("Custom Configuration", c.description)
+        assertEquals("Default Configuration", c.description)  // omitted → single-source DEFAULT.description
     }
 
     @Test
