@@ -25,11 +25,12 @@ object AAudioConstants {
     const val MIN_CHANNEL_COUNT = 1
     const val MAX_CHANNEL_COUNT = 16
 
-    /** Error type prefixes (FILE is only used by the native layer). */
+    /** Error type prefixes (FILE/TRUNC are only used by the native layer). */
     object ErrorTypes {
         const val PARAM = "[PARAM]"
         const val FOCUS = "[FOCUS]"
         const val STREAM = "[STREAM]"
+        const val TRUNC = "[TRUNC]"  // valid-but-incomplete recording (I/O failure or 4GB WAV limit)
     }
 
     /** Native AAudio constants (matching NDK definitions). */

@@ -3,6 +3,7 @@ package com.example.aaudiotester.recorder
 import android.Manifest
 import android.content.Context
 import com.example.aaudiotester.common.AAudioConfig
+import com.example.aaudiotester.common.AAudioConstants
 import com.example.aaudiotester.common.AAudioEngine
 import com.example.aaudiotester.common.AAudioMessages
 import com.example.aaudiotester.common.AAudioTestFragment
@@ -33,8 +34,8 @@ class RecorderFragment : AAudioTestFragment() {
     }
 
     override fun friendlyErrorMessage(raw: String): String = when {
-        // Must precede the generic [FILE] branch, whose prefix would otherwise swallow this
-        raw.startsWith("[FILE] Recording incomplete", ignoreCase = true) ->
+        // Protocol token from the native layer, not message wording — order-independent of [FILE]
+        raw.startsWith(AAudioConstants.ErrorTypes.TRUNC, ignoreCase = true) ->
             "The recording is incomplete: saving stopped early (storage error or 4GB WAV limit). The saved part is a valid WAV file."
         raw.startsWith("[FILE]", ignoreCase = true) ->
             "Unable to create recording file. Please check storage permissions and available space."

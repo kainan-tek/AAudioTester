@@ -472,8 +472,9 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv
             }
         } else if (truncated) {
             // File is valid but incomplete (causes are mutually exclusive, the logcat LOGE tells
-            // which): report instead of faking a full take
-            if (!notifyRecordingError("[FILE] Recording incomplete")) {
+            // which): report instead of faking a full take. [TRUNC] is a distinct token (not [FILE])
+            // so the Kotlin side matches on the protocol token, never on this message's wording
+            if (!notifyRecordingError("[TRUNC] Recording incomplete")) {
                 LOGW("Incomplete-recording report could not be delivered to the user (an earlier notice owns the latch)");
             }
         }
