@@ -334,7 +334,7 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_setNativeConfig(JNIEnv *en
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEnv *env,
+Java_com_example_aaudiotester_recorder_AAudioRecorder_startNative(JNIEnv *env,
                                                                              jobject thiz) {
     // Unreachable via Java: state and this flag are updated synchronously by notifications on the
     // same executor thread, so the Kotlin-side gate is an exact mirror of this one. Returning
@@ -344,7 +344,7 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
         return JNI_FALSE;
     }
 
-    LOGI("startNativeRecording");
+    LOGI("startNative");
 
     stopWriteThread();  // Clean up the leftover/unjoined writer thread from the last error (drain old data first, then rebuild resources)
 
@@ -405,9 +405,9 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv *env,
+Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNative(JNIEnv *env,
                                                                             jobject thiz) {
-    LOGI("stopNativeRecording");
+    LOGI("stopNative");
 
     g_recorder.is_recording.store(false, std::memory_order_release);
 
@@ -463,10 +463,10 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_releaseNative(JNIEnv *env,
     }
 
     // Clean up stream/WAV resources even if recording already ended (e.g. a stream error set
-    // is_recording false but left the WAV header unfinalized). stopNativeRecording resets
+    // is_recording false but left the WAV header unfinalized). stopNative resets
     // stream/wav_file, so this condition also avoids re-running it after a normal stop.
     if (g_recorder.stream || g_recorder.wav_file) {
-        Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(env, thiz);
+        Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNative(env, thiz);
     }
 
     // Binding is either unset or still ours here (the stale-release guard above returns on any

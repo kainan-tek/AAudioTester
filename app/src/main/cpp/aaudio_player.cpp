@@ -171,7 +171,7 @@ static void playReadThread() {
             } else if (g_player.ring->readable() == 0) {
                 // Notify stopped only on a genuine drain. An exit via stop_read_thread with data
                 // still queued is a user stop or a failed start — notification belongs to
-                // stopNativePlayback / the start-failure path, whose error this latch would swallow.
+                // stopNative / the start-failure path, whose error this latch would swallow.
                 // No-op when the error path owns the latch (deliverStoppedOnce's claim fails).
                 g_player.notifier.deliverStoppedOnce("playback stopped");
             }
@@ -425,9 +425,9 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_set
     return JNI_TRUE;
 }
 
-JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_startNativePlayback(JNIEnv* env,
+JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_startNative(JNIEnv* env,
                                                                                                  jobject thiz) {
-    LOGI("startNativePlayback");
+    LOGI("startNative");
 
     // Unreachable via Java: state and this flag are updated synchronously by notifications on the
     // same executor thread, so the Kotlin-side gate is an exact mirror of this one. Returning
@@ -517,9 +517,9 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
     return JNI_TRUE;
 }
 
-JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(JNIEnv* env,
+JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNative(JNIEnv* env,
                                                                                                  jobject thiz) {
-    LOGI("stopNativePlayback");
+    LOGI("stopNative");
 
     g_player.is_playing.store(false, std::memory_order_release);
     stopReadThread();
@@ -557,10 +557,10 @@ JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_release
     }
 
     // Clean up stream/WAV resources even if playback already ended (e.g. an error path whose queued
-    // stop() has not run yet). stopNativePlayback resets stream/wav_file to null, so this condition
+    // stop() has not run yet). stopNative resets stream/wav_file to null, so this condition
     // also avoids re-running it after a normal stop.
     if (g_player.stream || g_player.wav_file) {
-        Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(env, thiz);
+        Java_com_example_aaudiotester_player_AAudioPlayer_stopNative(env, thiz);
     }
 
     // Binding is either unset or still ours here (the stale-release guard above returns on any
