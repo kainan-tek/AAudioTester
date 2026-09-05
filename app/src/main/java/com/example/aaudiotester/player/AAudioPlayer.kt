@@ -129,7 +129,16 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
         }
 
         val result = startNativePlayback()
-        if (!result) {
+        if (result) {
+            // The native true return IS the started signal (synchronous, same executor thread —
+            // no separate started callback to lose). A terminal RT error may have raced the start:
+            // error-first, ignore a late start
+            if (!errored) {
+                state = State.PLAYING
+                listener?.onStarted()
+                Log.i(TAG, "Playback started successfully")
+            }
+        } else {
             abandonAudioFocus()
             // A real native failure always delivers onError synchronously (state becomes ERROR before
             // this returns). state still IDLE here means native returned false without notifying —
@@ -145,7 +154,12 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
         // Also entered from ERROR state: cleans up the stream/file/reader thread left by an error (triggered by Fragment.onError)
         if (state == State.IDLE) return
         Log.d(TAG, "Stopping playback")
-        stopNativePlayback()
+        // True = a stopped/error notice already reached Kotlin natively (latch owned by an async
+        // path, or delivered by this stop); false = delivery failed — run the same completion as
+        // the native callback so the UI recovers (return-value protocol, same as start)
+        if (!stopNativePlayback()) {
+            onNativePlaybackStopped()
+        }
         state = State.IDLE
     }
 
@@ -209,19 +223,10 @@ class AAudioPlayer(context: Context, private val nativeExecutor: Executor) : AAu
         usage: Int, contentType: Int, performanceMode: Int, sharingMode: Int, filePath: String
     ): Boolean
     private external fun startNativePlayback(): Boolean
-    private external fun stopNativePlayback()
+    private external fun stopNativePlayback(): Boolean
     private external fun releaseNative()
 
-    // Native layer callbacks
-    @Suppress("unused")
-    private fun onNativePlaybackStarted() {
-        if (errored) return  // error-first: native already stopped, ignore a started arriving late in a race
-        state = State.PLAYING
-        listener?.onStarted()
-        Log.i(TAG, "Playback started successfully")
-    }
-
-    @Suppress("unused")
+    // Native layer callbacks (JNI-invoked; onStopped is also self-run by stop() on delivery failure)
     private fun onNativePlaybackStopped() {
         state = State.IDLE
         abandonAudioFocus()

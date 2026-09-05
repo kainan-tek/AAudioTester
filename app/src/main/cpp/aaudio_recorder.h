@@ -71,8 +71,11 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
  * Stop audio recording
  * @param env JNI environment
  * @param thiz Java object instance
+ * @return JNI_TRUE if a stopped/error notice already reached Java (delivered here, or the latch is
+ *         owned by the error path); JNI_FALSE if delivery failed — Java must run the onStopped
+ *         completion itself
  */
-JNIEXPORT void JNICALL
+JNIEXPORT jboolean JNICALL
 Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv *env,
                                                                           jobject thiz);
 

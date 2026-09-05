@@ -45,7 +45,6 @@ struct AudioRecorderState {
 
     JavaVM *jvm = nullptr;
     jobject recorder_instance = nullptr;
-    jmethodID on_recording_started_method = nullptr;
     jmethodID on_recording_stopped_method = nullptr;
     jmethodID on_recording_error_method = nullptr;
 
@@ -72,19 +71,6 @@ namespace {
 
 void aaudio_recorder_set_jvm(JavaVM* vm) {
     g_recorder.jvm = vm;
-}
-
-static bool notifyRecordingError(const std::string &error);  // Forward: started's failure path delivers as an error
-
-static void notifyRecordingStarted() {
-    if (!aaudio_common::callVoidMethod(g_recorder.jvm, g_recorder.recorder_instance,
-                                       g_recorder.on_recording_started_method, "recording started")) {
-        // The session is live but Kotlin never learned of it (state stays IDLE, and stop() is
-        // IDLE-gated — no UI way to end it): deliver as a terminal error instead, so the existing
-        // ERROR path (state=ERROR → Fragment.onError queues stop()) cleans up and recovers the UI.
-        // Safe to call directly: we are on the executor thread, not the RT callback thread.
-        notifyRecordingError("[STREAM] Started notification failed to deliver");
-    }
 }
 
 static bool notifyRecordingStopped() {
@@ -322,15 +308,12 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_initializeNative(JNIEnv *e
         return JNI_FALSE;
     }
 
-    g_recorder.on_recording_started_method = env->GetMethodID(clazz, "onNativeRecordingStarted",
-                                                              "()V");
     g_recorder.on_recording_stopped_method = env->GetMethodID(clazz, "onNativeRecordingStopped",
                                                               "()V");
     g_recorder.on_recording_error_method = env->GetMethodID(clazz, "onNativeRecordingError",
                                                             "(Ljava/lang/String;)V");
 
-    if (!g_recorder.on_recording_started_method || !g_recorder.on_recording_stopped_method ||
-        !g_recorder.on_recording_error_method) {
+    if (!g_recorder.on_recording_stopped_method || !g_recorder.on_recording_error_method) {
         LOGE("Failed to get callback method IDs");
         env->DeleteLocalRef(clazz);
         if (g_recorder.recorder_instance) {
@@ -456,12 +439,15 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_startNativeRecording(JNIEn
         return JNI_FALSE;
     }
 
-    notifyRecordingStarted();
-
+    // No started notification: Kotlin derives "recording" from this JNI_TRUE return — the
+    // synchronous result of this very call, on the same executor thread. JNI callbacks stay
+    // reserved for asynchronous events delivered from other threads (stopped/error), which cannot
+    // ride the return value; a delivery-failure fallback for started would share every failure
+    // condition with the primary call and thus be dead code.
     return JNI_TRUE;
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jboolean JNICALL
 Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv *env,
                                                                             jobject thiz) {
     LOGI("stopNativeRecording");
@@ -499,14 +485,19 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNativeRecording(JNIEnv
     }
 
     // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set),
-    // same protocol as the player's stop path — claimed until the next start resets it
-    if (!g_recorder.callback_notified.exchange(true, std::memory_order_acq_rel)) {
-        if (!notifyRecordingStopped()) {
-            // Session is over either way; callVoidMethod already logged the reason and the latch
-            // is reset by the next start — this log just makes a lost UI update attributable
-            LOGW("Stopped notification could not be delivered");
-        }
+    // same protocol as the player's stop path — claimed until the next start resets it.
+    // Return-value contract (same protocol as start): JNI_TRUE = a notice already reached Kotlin
+    // (delivered here, or the latch is owned by the error path); JNI_FALSE = our delivery
+    // failed — Kotlin self-runs the onStopped completion to recover the UI.
+    if (g_recorder.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+        return JNI_TRUE;  // error path owns the latch: the UI was already updated by its notice
     }
+    if (notifyRecordingStopped()) {
+        return JNI_TRUE;
+    }
+    // Session is over either way; callVoidMethod already logged the reason and the latch is reset
+    // by the next start — JNI_FALSE just tells Kotlin to run the onStopped completion itself
+    return JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
@@ -536,7 +527,6 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_releaseNative(JNIEnv *env,
     if (g_recorder.recorder_instance) {
         env->DeleteGlobalRef(g_recorder.recorder_instance);
         g_recorder.recorder_instance = nullptr;
-        g_recorder.on_recording_started_method = nullptr;
         g_recorder.on_recording_stopped_method = nullptr;
         g_recorder.on_recording_error_method = nullptr;
     }

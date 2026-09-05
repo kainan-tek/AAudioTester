@@ -110,10 +110,19 @@ class AAudioRecorder(context: Context, private val nativeExecutor: Executor) : A
         }
 
         val result = startNativeRecording()
-        // A real native failure always delivers onError synchronously (state becomes ERROR before
-        // this returns). state still IDLE here means native returned false without notifying —
-        // the cross-language contract is broken; recover the UI instead of sticking it forever
-        if (!result && state == State.IDLE) {
+        if (result) {
+            // The native true return IS the started signal (synchronous, same executor thread —
+            // no separate started callback to lose). A terminal RT error may have raced the start:
+            // error-first, ignore a late start
+            if (!errored) {
+                state = State.RECORDING
+                listener?.onStarted()
+                Log.i(TAG, "Recording started successfully")
+            }
+        } else if (state == State.IDLE) {
+            // A real native failure always delivers onError synchronously (state becomes ERROR before
+            // this returns). state still IDLE here means native returned false without notifying —
+            // the cross-language contract is broken; recover the UI instead of sticking it forever
             listener?.onError("${AAudioConstants.ErrorTypes.STREAM} Native start failed without error callback")
         }
         return result
@@ -123,7 +132,12 @@ class AAudioRecorder(context: Context, private val nativeExecutor: Executor) : A
         // Also entered from ERROR state: cleans up the stream/file/writer thread left by an error (triggered by Fragment.onError)
         if (state == State.IDLE) return
         Log.d(TAG, "Stopping recording")
-        stopNativeRecording()
+        // True = a stopped/error notice already reached Kotlin natively (latch owned by an async
+        // path, or delivered by this stop); false = delivery failed — run the same completion as
+        // the native callback so the UI recovers (return-value protocol, same as start)
+        if (!stopNativeRecording()) {
+            onNativeRecordingStopped()
+        }
         state = State.IDLE
     }
 
@@ -156,19 +170,10 @@ class AAudioRecorder(context: Context, private val nativeExecutor: Executor) : A
         performanceMode: Int, sharingMode: Int, audioFilePath: String
     ): Boolean
     private external fun startNativeRecording(): Boolean
-    private external fun stopNativeRecording()
+    private external fun stopNativeRecording(): Boolean
     private external fun releaseNative()
 
-    // Native layer callbacks
-    @Suppress("unused")
-    private fun onNativeRecordingStarted() {
-        if (errored) return  // error-first: native already stopped, ignore a started arriving late in a race
-        state = State.RECORDING
-        listener?.onStarted()
-        Log.i(TAG, "Recording started successfully")
-    }
-
-    @Suppress("unused")
+    // Native layer callbacks (JNI-invoked; onStopped is also self-run by stop() on delivery failure)
     private fun onNativeRecordingStopped() {
         state = State.IDLE
         listener?.onStopped()

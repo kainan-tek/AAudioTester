@@ -45,9 +45,12 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
  * Stop audio playback
  * @param env JNI environment
  * @param thiz Java object instance
+ * @return JNI_TRUE if a stopped/error notice already reached Java (delivered here, or the latch is
+ *         owned by the error/EOF path); JNI_FALSE if delivery failed — Java must run the onStopped
+ *         completion itself
  */
-JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(JNIEnv* env,
-                                                                                            jobject thiz);
+JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(JNIEnv* env,
+                                                                                                jobject thiz);
 
 /**
  * Release audio player resources

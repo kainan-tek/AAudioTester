@@ -56,7 +56,6 @@ struct AudioPlayerState {
 
     JavaVM* jvm = nullptr;
     jobject player_instance = nullptr;
-    jmethodID on_playback_started_method = nullptr;
     jmethodID on_playback_stopped_method = nullptr;
     jmethodID on_playback_error_method = nullptr;
 
@@ -132,19 +131,6 @@ static inline bool writeGpioValue(int value) {
 }
 
 #endif
-
-static void notifyPlaybackError(const std::string& error);  // Forward: started's failure path delivers as an error
-
-static void notifyPlaybackStarted() {
-    if (!aaudio_common::callVoidMethod(g_player.jvm, g_player.player_instance, g_player.on_playback_started_method,
-                                       "playback started")) {
-        // The session is live but Kotlin never learned of it (state stays IDLE, and stop() is
-        // IDLE-gated — no UI way to end it): deliver as a terminal error instead, so the existing
-        // ERROR path (state=ERROR → Fragment.onError queues stop()) cleans up and recovers the UI.
-        // Safe to call directly: we are on the executor thread, not the RT callback thread.
-        notifyPlaybackError("[STREAM] Started notification failed to deliver");
-    }
-}
 
 static bool notifyPlaybackStopped() {
     return aaudio_common::callVoidMethod(g_player.jvm, g_player.player_instance, g_player.on_playback_stopped_method,
@@ -428,14 +414,12 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_ini
         return JNI_FALSE;
     }
 
-    g_player.on_playback_started_method = env->GetMethodID(clazz, "onNativePlaybackStarted", "()V");
     g_player.on_playback_stopped_method = env->GetMethodID(clazz, "onNativePlaybackStopped", "()V");
     g_player.on_playback_error_method = env->GetMethodID(clazz, "onNativePlaybackError", "(Ljava/lang/String;)V");
 
     env->DeleteLocalRef(clazz);
 
-    if (!g_player.on_playback_started_method || !g_player.on_playback_stopped_method ||
-        !g_player.on_playback_error_method) {
+    if (!g_player.on_playback_stopped_method || !g_player.on_playback_error_method) {
         LOGE("Failed to get callback method IDs");
         if (g_player.player_instance) {
             env->DeleteGlobalRef(g_player.player_instance);
@@ -563,12 +547,16 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
         return JNI_FALSE;
     }
 
-    notifyPlaybackStarted();
+    // No started notification: Kotlin derives "started" from this JNI_TRUE return — the synchronous
+    // result of this very call, on the same executor thread. JNI callbacks stay reserved for
+    // asynchronous events delivered from other threads (stopped/error), which cannot ride the
+    // return value; a delivery-failure fallback for started would share every failure condition
+    // with the primary call and thus be dead code.
     return JNI_TRUE;
 }
 
-JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(JNIEnv* env,
-                                                                                             jobject thiz) {
+JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNativePlayback(JNIEnv* env,
+                                                                                                 jobject thiz) {
     LOGI("stopNativePlayback");
 
     g_player.is_playing.store(false, std::memory_order_release);
@@ -590,14 +578,19 @@ JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_stopNat
     closeGpio();
 #endif
 
-    // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set), avoiding double notification
-    if (!g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
-        if (!notifyPlaybackStopped()) {
-            // Session is over either way; callVoidMethod already logged the reason and the latch
-            // is reset by the next start — this log just makes a lost UI update attributable
-            LOGW("Stopped notification could not be delivered");
-        }
+    // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set), avoiding double notification.
+    // Return-value contract (same protocol as start): JNI_TRUE = a notice already reached Kotlin
+    // (delivered here, or the latch is owned by the error/EOF path); JNI_FALSE = our delivery
+    // failed — Kotlin self-runs the onStopped completion to recover the UI.
+    if (g_player.callback_notified.exchange(true, std::memory_order_acq_rel)) {
+        return JNI_TRUE;  // error/EOF path owns the latch: the UI was already updated by its notice
     }
+    if (notifyPlaybackStopped()) {
+        return JNI_TRUE;
+    }
+    // Session is over either way; callVoidMethod already logged the reason and the latch is reset
+    // by the next start — JNI_FALSE just tells Kotlin to run the onStopped completion itself
+    return JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_releaseNative(JNIEnv* env, jobject thiz) {
@@ -625,7 +618,6 @@ JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_release
     if (g_player.player_instance) {
         env->DeleteGlobalRef(g_player.player_instance);
         g_player.player_instance = nullptr;
-        g_player.on_playback_started_method = nullptr;
         g_player.on_playback_stopped_method = nullptr;
         g_player.on_playback_error_method = nullptr;
     }
