@@ -86,6 +86,8 @@ External hot-reload: place the file at `/data/aaudio_configs.xml` (takes priorit
 
 ## Known Limitations
 
+This section covers user-visible product limitations; implementation-level design trade-offs (notification degradation policy, RT thread constraints, etc.) are documented in [docs/known-limitations.md](docs/known-limitations.md).
+
 - Disk I/O is moved off the AAudio real-time callback via a ring buffer + dedicated read/write threads (the callback only does memcpy). The recording callback uses `tryWrite`, dropping whole frames when the ring buffer is full (never blocks); on slow storage frames are dropped (see the `Recording dropped bytes` log). On playback, if the read thread can't keep up, underruns output silence (see the `Playback underruns` log).
 - AAOS emulator: shortly after restoring from a snapshot, audio focus requests may be rejected (Start reports an error); retry after a few minutes
 

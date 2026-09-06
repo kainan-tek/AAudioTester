@@ -86,6 +86,8 @@ adb logcat -s AAudioPlayer AAudioRecorder
 
 ## 已知限制
 
+本节为用户可见的产品级限制；实现层的设计取舍（通知降级策略、RT 线程约束等）见 [docs/known-limitations.md](docs/known-limitations.md)。
+
 - 磁盘 I/O 已通过「环形缓冲 + 独立读写线程」移出 AAudio 实时回调（回调只 memcpy）。录音回调为 `tryWrite`，缓冲满时整帧丢弃（宁丢不阻塞），慢存储下会掉帧（日志 `Recording dropped bytes` 可见）；播放侧读线程跟不上时补静音 underrun（日志 `Playback underruns` 可见）。
 - AAOS 模拟器：从快照恢复后短时间内，音频焦点请求可能被拒（点 Start 报错），等待几分钟重试即可
 
