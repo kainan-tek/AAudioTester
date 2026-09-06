@@ -97,9 +97,7 @@ static void recordWriteThread() {
     };
     while (!g_recorder.stop_write_thread.load(std::memory_order_acquire)) {
         // Terminal error set by the RT callback: delivered here to avoid JNI on the callback thread
-        if (const char* msg = g_recorder.rt_error.take()) {
-            g_recorder.is_recording.store(false, std::memory_order_release);
-            g_recorder.notifier.deliverErrorOnce(msg, "recording error");
+        if (consumeRtError(g_recorder.rt_error, g_recorder.is_recording, g_recorder.notifier, "recording error")) {
             // break, not return: the ring still holds audio captured before the stream died —
             // valid data, so the exit-drain below saves it. The stop path joins this thread
             // before closing the WAV file, so the drained tail lands in a consistent file.
@@ -118,10 +116,7 @@ static void recordWriteThread() {
         writeOut(buf.data(), n);
     }
     // After draining, deliver an error the RT callback may have set during the stop race window
-    if (const char* msg = g_recorder.rt_error.take()) {
-        g_recorder.is_recording.store(false, std::memory_order_release);
-        g_recorder.notifier.deliverErrorOnce(msg, "recording error");
-    }
+    consumeRtError(g_recorder.rt_error, g_recorder.is_recording, g_recorder.notifier, "recording error");
     if (save_failed) {
         LOGW("Recording finished: %zu bytes not saved (file write failed)", unsaved_bytes);
     }
@@ -200,11 +195,11 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream *stream,
 static void errorCallback(AAudioStream *stream, void *userData, aaudio_result_t error) {
     LOGE("AAudio error callback: %s", AAudio_convertResultToText(error));
     g_recorder.is_recording.store(false, std::memory_order_release);
-    // Same RT discipline as the data callback: flag only, no allocation, no JNI. The message is
-    // composed into rt_error.buf by publishf (the RT-safe composition point); the writer thread
-    // delivers to Java. After notifying,
+    // Same RT discipline as the data callback: flag only, no allocation, no JNI. A static
+    // literal is published (the specific result text is in the LOGE line above); the writer
+    // thread delivers to Java. After notifying,
     // Fragment.onError cleans up via stop() (close stream, join writer thread, backfill WAV header).
-    g_recorder.rt_error.publishf("[STREAM] Recording stream error: %s", AAudio_convertResultToText(error));
+    g_recorder.rt_error.publish("[STREAM] Recording stream error");
 }
 
 static bool createAAudioStream() {
@@ -419,17 +414,14 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNative(JNIEnv *env,
         g_recorder.wav_file.reset();
         if (!finalized) {
             // Header backfill failed: recording data wasn't fully saved; report as an error rather than faking a normal finish
-            if (!g_recorder.notifier.deliverErrorOnce(
-                    "[FILE] Failed to finalize recording file (header write failed)", "recording error")) {
-                LOGW("Finalization failure could not be delivered (already reported by an earlier notice, or delivery failed)");
-            }
+            // (a lost delivery is attributed by deliverErrorOnce itself)
+            g_recorder.notifier.deliverErrorOnce(
+                "[FILE] Failed to finalize recording file (header write failed)", "recording error");
         } else if (truncated) {
             // File is valid but incomplete (causes are mutually exclusive, the logcat LOGE tells
             // which): report instead of faking a full take. [TRUNC] is a distinct token (not [FILE])
             // so the Kotlin side matches on the protocol token, never on this message's wording
-            if (!g_recorder.notifier.deliverErrorOnce("[TRUNC] Recording incomplete", "recording error")) {
-                LOGW("Incomplete-recording report could not be delivered (already reported by an earlier notice, or delivery failed)");
-            }
+            g_recorder.notifier.deliverErrorOnce("[TRUNC] Recording incomplete", "recording error");
         }
     }
     g_recorder.ring.reset();

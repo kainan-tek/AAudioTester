@@ -87,6 +87,11 @@ size_t readChunkBytes() {
     return (64 * 1024) / frame_size * frame_size;
 }
 
+// The two file-read-failure paths (EOF read error in the reader thread, start-prefill failure)
+// report the same protocol message: the [FILE] token is what the Kotlin side routes on, and a
+// shared constant keeps the two paths identical by construction instead of by hand-sync
+const char kFileReadFailureMsg[] = "[FILE] Audio read failed or file truncated";
+
 }  // namespace
 
 void aaudio_player_set_jvm(JavaVM* vm) {
@@ -146,9 +151,7 @@ static void playReadThread() {
     std::vector<char> buf(readChunkBytes());
     while (!g_player.stop_read_thread.load(std::memory_order_acquire)) {
         // Terminal error set by the RT callback: delivered here to avoid JNI on the callback thread
-        if (const char* msg = g_player.rt_error.take()) {
-            g_player.is_playing.store(false, std::memory_order_release);
-            g_player.notifier.deliverErrorOnce(msg, "playback error");
+        if (consumeRtError(g_player.rt_error, g_player.is_playing, g_player.notifier, "playback error")) {
             return;
         }
         const size_t n = g_player.wav_file->readAudioData(buf.data(), buf.size());
@@ -156,7 +159,7 @@ static void playReadThread() {
             if (g_player.wav_file->hasReadError()) {
                 // I/O error or truncated file: report as an error rather than faking a normal EOF
                 g_player.is_playing.store(false, std::memory_order_release);
-                g_player.notifier.deliverErrorOnce("[FILE] Audio read failed or file truncated",
+                g_player.notifier.deliverErrorOnce(kFileReadFailureMsg,
                                                    "playback error");
                 return;
             }
@@ -212,10 +215,7 @@ static void playReadThread() {
         }
     }
     // Before exit, deliver an error the RT callback may have set during the stop race window
-    if (const char* msg = g_player.rt_error.take()) {
-        g_player.is_playing.store(false, std::memory_order_release);
-        g_player.notifier.deliverErrorOnce(msg, "playback error");
-    }
+    consumeRtError(g_player.rt_error, g_player.is_playing, g_player.notifier, "playback error");
 }
 
 static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
@@ -293,13 +293,13 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
 static void errorCallback(AAudioStream* stream, void* userData, aaudio_result_t error) {
     LOGE("AAudio error: %s", AAudio_convertResultToText(error));
     g_player.is_playing.store(false, std::memory_order_release);
-    // Same RT discipline as the data callback: flag only, no allocation, no JNI. The message is
-    // composed into rt_error.buf by publishf (the RT-safe composition point); the reader thread
-    // delivers to Java. After notifying,
+    // Same RT discipline as the data callback: flag only, no allocation, no JNI. A static
+    // literal is published (the specific result text is in the LOGE line above); the reader
+    // thread delivers to Java. After notifying,
     // Fragment.onError cleans up via stop() (close stream, join reader thread).
     // If the reader has already exited (stop path joined it), the flag stays unconsumed and the session ends as
     // onStopped instead of onError — acceptable, the session is ending anyway.
-    g_player.rt_error.publishf("[STREAM] Playback stream error: %s", AAudio_convertResultToText(error));
+    g_player.rt_error.publish("[STREAM] Playback stream error");
 }
 
 static bool createAAudioStream() {
@@ -458,6 +458,23 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
         return JNI_FALSE;
     }
 
+    // Pre-fill one chunk before any stream exists: a zero read is a plain early failure — the
+    // file cannot feed a session — so no stream/ring teardown is needed (and the reader-spawn
+    // race the old post-open placement had to guard against cannot arise)
+    std::vector<char> prefill(readChunkBytes());
+    const size_t n = g_player.wav_file->readAudioData(prefill.data(), prefill.size());
+    if (n == 0) {
+        // Zero bytes at open = first-chunk I/O failure, or a data section that is actually empty
+        // (only reachable via the streaming-WAV size fallback)
+        const bool read_failed = g_player.wav_file->hasReadError();
+        g_player.wav_file.reset();
+        g_player.notifier.deliverErrorOnce(
+            read_failed ? kFileReadFailureMsg
+                        : "[FILE] Audio file contains no audio data",
+            "playback error");
+        return JNI_FALSE;
+    }
+
     if (!createAAudioStream()) {
         g_player.wav_file.reset();
         g_player.notifier.deliverErrorOnce("[STREAM] Failed to create playback stream", "playback error");
@@ -465,30 +482,12 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sta
     }
 
     // Ring buffer + reader thread: the file streams into the buffer, the callback only memcpys (disk I/O moved off the real-time thread).
+    // The prefill write must precede thread spawn — the file position is shared — so the first
+    // callback (it races ahead of the reader's first disk read) never hits an empty ring (underrun).
     g_player.ring = std::make_unique<SpScRingBuffer>(kDefaultRingCapacity);
     g_player.eof_reached.store(false, std::memory_order_release);
     g_player.stop_read_thread.store(false, std::memory_order_release);
     g_player.underrun_count.store(0, std::memory_order_relaxed);
-    // Pre-fill one chunk so the first callback (it races ahead of the reader's first disk read)
-    // never hits an empty ring (underrun). Must precede thread spawn — the file position is shared.
-    std::vector<char> prefill(readChunkBytes());
-    const size_t n = g_player.wav_file->readAudioData(prefill.data(), prefill.size());
-    if (n == 0) {
-        // Zero bytes at open = first-chunk I/O failure, or a data section that is actually empty
-        // (only reachable via the streaming-WAV size fallback). Spawning the reader would run its
-        // EOF/error teardown (notify + stream reset) concurrently with requestStart below —
-        // close the stream / consume the notification latch mid-start. Fail here instead:
-        // no reader thread, no race, the error notification is delivered synchronously.
-        const bool read_failed = g_player.wav_file->hasReadError();
-        g_player.stream.reset();
-        g_player.ring.reset();
-        g_player.wav_file.reset();
-        g_player.notifier.deliverErrorOnce(
-            read_failed ? "[FILE] Audio read failed or file truncated"
-                        : "[FILE] Audio file contains no audio data",
-            "playback error");
-        return JNI_FALSE;
-    }
     g_player.ring->write(prefill.data(), n);
     g_player.read_thread = std::thread(playReadThread);
 

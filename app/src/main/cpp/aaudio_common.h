@@ -12,8 +12,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdarg>
-#include <cstdio>
 #include <memory>
 #include <string>
 
@@ -33,28 +31,17 @@ struct AAudioStreamDeleter {
 };
 using AAudioStreamPtr = std::unique_ptr<AAudioStream, AAudioStreamDeleter>;
 
-// Terminal-error slot for RT→worker delivery (one per engine): the RT callback publishes a static
-// literal, or a message composed into buf (no heap on the RT thread); the worker thread takes it
-// on a non-RT thread and delivers it to Java. errorCallback fires at most once per stream, so buf
-// has a single writer (data-callback branches publish literals only, never touching buf);
-// publish()'s release-store happens-after the buffer write, and take()'s acquire makes
-// buffer contents visible before the message is read.
+// Terminal-error slot for RT→worker delivery (one per engine): the RT callback publishes a
+// pointer to STATIC storage; the worker thread takes it on a non-RT thread and delivers it to
+// Java. No buffer, no composition on the RT thread — publish/take is a plain atomic pointer
+// hand-off, so there is no lifetime or single-writer invariant to maintain.
 struct RtErrorSlot {
     std::atomic<const char*> msg{nullptr};
-    char buf[128] = {};
 
-    // RT side: publish a static literal or a message written into buf
+    // RT side: publish a static literal (text must point to static storage — the worker may
+    // read it long after the callback returned)
     void publish(const char* text) { msg.store(text, std::memory_order_release); }
 
-    // RT side: compose a message into buf (no heap) and publish it — the RT-safe composition
-    // point. The format attribute keeps the format string and arguments checked at compile time.
-    void publishf(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
-        va_list args;
-        va_start(args, fmt);
-        vsnprintf(buf, sizeof(buf), fmt, args);
-        va_end(args);
-        publish(buf);
-    }
     // Worker side: non-consuming check (loop conditions)
     bool pending() const { return msg.load(std::memory_order_acquire) != nullptr; }
     // Worker side: take the pending message (nullptr if none), leaving the slot empty. One atomic
@@ -118,20 +105,24 @@ inline jclass bindJavaInstance(JNIEnv* env, jobject thiz, jobject& instance, con
     return clazz;
 }
 
-// No-arg callback notification: null-check JNI refs + attach + CallVoidMethod.
-// Returns false when the notification was NOT delivered (references unset, thread attach failed,
-// or the listener threw) so latch-consuming callers can release the latch — symmetric with
-// notifyErrorToJava below.
+// Shared delivery skeleton: null-check JNI refs + attach + invoke + exception cleanup.
 // Lock-free: all bind/release runs on the shared Kotlin executor thread, and the instance read
 // below cannot race it: initializeNative joins any leftover reader/writer worker BEFORE
 // rebinding (hard join-before-rebind invariant — a worker's late notifications always run
 // against the binding they were created under), AAudioStream_close joins in-flight callbacks,
 // and a released engine's late stop() is dropped by the IDLE gate set at the end of release().
-// A listener exception after CallVoidMethod counts as NOT delivered (returns false): the notice's
-// effect (the listener's UI update) did not complete, and a claimed latch would leave no recovery
-// path. Returning false hands recovery to the established mechanisms (latch release → a later
-// stopped delivery, or Kotlin stop()'s self-run).
-inline bool callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, const char* name) {
+// Returns false when the notification was NOT delivered (references unset, thread attach failed,
+// invoke failed, or the listener threw) so latch-consuming callers can release the latch — a
+// lost notification must not also consume the right to notify. A listener exception after the
+// call counts as NOT delivered (returns false): the notice's effect (the listener's UI update)
+// did not complete, and a claimed latch would leave no recovery path. Returning false hands
+// recovery to the established mechanisms (latch release → a later stopped delivery, or Kotlin
+// stop()'s self-run). `invoke` performs the CallVoidMethod (with any arguments) and returns
+// false if it failed BEFORE invoking (reason already logged, pending exception already cleared —
+// the skeleton must not misreport that as a listener throw).
+template <typename Invoke>
+inline bool deliverVoidNotification(JavaVM* jvm, jobject instance, jmethodID method,
+                                    const char* name, Invoke&& invoke) {
     if (!jvm || !instance || !method) {
         AAC_LOGW("Cannot notify %s: JNI references not set", name);
         return false;
@@ -141,7 +132,9 @@ inline bool callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, cons
         AAC_LOGW("Failed to attach thread for JNI callback");
         return false;
     }
-    attach.env->CallVoidMethod(instance, method);
+    if (!invoke(attach.env, instance, method)) {
+        return false;  // pre-invoke failure: already logged, exception already cleared
+    }
     if (attach.env->ExceptionCheck()) {
         // A throwing listener must not leave a pending exception across DetachCurrentThread
         AAC_LOGW("Java listener threw in %s notification (exception cleared)", name);
@@ -151,38 +144,31 @@ inline bool callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, cons
     return true;
 }
 
+// No-arg callback notification.
+inline bool callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, const char* name) {
+    return deliverVoidNotification(jvm, instance, method, name,
+                                   [](JNIEnv* env, jobject obj, jmethodID m) {
+                                       env->CallVoidMethod(obj, m);
+                                       return true;
+                                   });
+}
+
 // Error callback notification with a string argument.
-// Returns false when the notification was NOT delivered (references unset, thread attach failed,
-// string creation failed, or the listener threw) so the caller can release its dedup latch — a
-// lost notification must not also consume the right to notify.
 inline bool notifyErrorToJava(JavaVM* jvm, jobject instance, jmethodID method, const std::string& error,
                               const char* name) {
-    if (!jvm || !instance || !method) {
-        AAC_LOGW("Cannot notify %s: JNI references not set", name);
-        return false;
-    }
-    JniThreadAttachment attach(jvm);
-    if (!attach.ok()) {
-        AAC_LOGW("Failed to attach thread for JNI callback");
-        return false;
-    }
-    jstring error_str = attach.env->NewStringUTF(error.c_str());
-    if (!error_str) {
-        // Delivering null would NPE the Kotlin listener; abandon this notification instead
-        AAC_LOGW("Failed to create error string for %s notification", name);
-        attach.env->ExceptionClear();  // NewStringUTF leaves an OutOfMemoryError pending
-        return false;
-    }
-    attach.env->CallVoidMethod(instance, method, error_str);
-    attach.env->DeleteLocalRef(error_str);
-    if (attach.env->ExceptionCheck()) {
-        // Same as callVoidMethod: never detach with a pending exception, and a thrown listener
-        // counts as not delivered (the UI update did not complete — see there)
-        AAC_LOGW("Java listener threw in %s notification (exception cleared)", name);
-        attach.env->ExceptionClear();
-        return false;
-    }
-    return true;
+    return deliverVoidNotification(jvm, instance, method, name,
+                                   [&](JNIEnv* env, jobject obj, jmethodID m) {
+                                       jstring error_str = env->NewStringUTF(error.c_str());
+                                       if (!error_str) {
+                                           // Delivering null would NPE the Kotlin listener; abandon this notification instead
+                                           AAC_LOGW("Failed to create error string for %s notification", name);
+                                           env->ExceptionClear();  // NewStringUTF leaves an OutOfMemoryError pending
+                                           return false;
+                                       }
+                                       env->CallVoidMethod(obj, m, error_str);
+                                       env->DeleteLocalRef(error_str);
+                                       return true;
+                                   });
 }
 
 // Java notification endpoint for one engine: JVM + listener binding + the one-shot "already
@@ -307,10 +293,14 @@ struct JavaNotifier {
     }
 
     // The error-delivery policy shared by both engines: claim → deliver → release on failure so a
-    // later path can retry. True iff delivered (false = swallowed by an earlier notice, or
-    // delivery failed — callers with a genuine loss to report keep it attributable in logcat).
+    // later path can retry. True iff delivered. On false the loss is attributed in logcat HERE
+    // (swallowed by an earlier notice, or delivery failed) — callers need no wrapper logging
+    // around the return value.
     bool deliverErrorOnce(const std::string& error, const char* name) {
         if (!claim()) {
+            // The message is genuinely lost (an earlier notice owns the latch); keep the loss
+            // attributable — the delivery-failure path below logs the same way
+            AAC_LOGW("%s not delivered (latch owned by an earlier notice): %s", name, error.c_str());
             return false;
         }
         if (notifyErrorToJava(jvm, instance, error_method, error, name)) {
@@ -323,6 +313,18 @@ struct JavaNotifier {
         return false;
     }
 };
+
+// The worker threads' standard RT-error teardown: consume the terminal message, clear the
+// session flag (the RT callback then returns STOP and a fresh start is gated), deliver the
+// error through the one-shot latch. Returns true when a message was consumed.
+inline bool consumeRtError(RtErrorSlot& slot, std::atomic<bool>& session_flag,
+                           JavaNotifier& notifier, const char* name) {
+    const char* msg = slot.take();
+    if (!msg) return false;
+    session_flag.store(false, std::memory_order_release);
+    notifier.deliverErrorOnce(msg, name);
+    return true;
+}
 
 // format → bytes per sample (unknown formats treated as 16-bit)
 inline int32_t bytesPerSample(aaudio_format_t format) {
