@@ -33,9 +33,10 @@ class AAudioPlayer(context: Context, nativeExecutor: Executor) :
     @Volatile
     private var audioFocusRequest: AudioFocusRequest? = null
     // Written on the executor (requestAudioFocus in start) and abandoned from native worker threads
-    // (onSessionTerminated via the terminal-notice callbacks) with no happens-between edge — a plain
-    // var is a JMM data race across that boundary. A stale session's abandon can still observe the
-    // NEXT session's request (single-field design; inherent edge, narrowed by the start CAS).
+    // (onSessionTerminated via the terminal-notice callbacks). The identity race is closed by the
+    // base's notice ordering: the abandon completes BEFORE the notice publishes TERMINAL, and the
+    // next start's re-arm CAS must observe that volatile write — so the abandon happens-before any
+    // next session's request write, and a stale abandon can never see the new session's request.
 
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {

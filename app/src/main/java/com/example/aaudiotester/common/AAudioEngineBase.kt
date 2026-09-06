@@ -125,9 +125,11 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
             listener?.onError(alreadyActiveNotice)
             return false
         }
-        // Re-arm from a previous session's terminal state. Safe: the session's reader thread has
-        // exited by then (its terminal notice is that thread's last act; native start/stop also
-        // join it before spawning a new one), so no write can land after this settle.
+        // Re-arm from a previous session's terminal state. Safe: the terminal notice releases the
+        // session's resources (onSessionTerminated) BEFORE publishing TERMINAL, so this CAS — which
+        // must observe that volatile write — also orders after the release; nothing of the old
+        // session can land after this settle. (Native start/stop additionally join the notice
+        // thread before spawning a new one.)
         state.compareAndSet(SessionState.TERMINAL, SessionState.IDLE)
 
         beforeStartNative()?.let { error ->
@@ -186,7 +188,11 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
 
     final override fun release() {
         try {
-            if (state.get() == SessionState.ACTIVE) stop()
+            // Unconditional: the IDLE gate makes it a no-op on a settled session, and from TERMINAL
+            // it runs the same cleanup the Fragment's onError protocol would queue — so the native
+            // teardown happens through the front door and releaseNative's internal stop never lands
+            // on a settled state (the re-entrant onNativeStopped residual is gone).
+            stop()
             listener = null
         } finally {
             // Everything here must survive the JNI-boundary throwables above (stop's stopNative is
@@ -194,10 +200,9 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
             // releaseNative leaks the stream/hardware session with the IDLE gate below blocking any
             // later recovery stop. releaseNative is idempotent over partially-torn native state
             // (stale-release guard + stream/wav null checks). Errors still propagate to the outer
-            // guard — but reclaimed and settled. Known residual: a synchronous onNativeStopped
-            // delivered by releaseNative's internal stop lands after this settle and leaves
-            // TERMINAL on this dead instance (listener already null; a late stop self-heals
-            // through the gate pass + idempotent native no-op).
+            // guard — but reclaimed and settled. Narrowed residual: only when stop() itself threw
+            // mid-teardown can releaseNative's internal stop still re-enter onNativeStopped after
+            // this settle (listener not yet nulled; the notice is truthful and UI-guarded).
             onSessionTerminated()
             state.set(SessionState.IDLE)
             try {
@@ -214,8 +219,12 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
     // leaves native state to clean up, surfaced via onError (Fragment.onError queues that cleanup
     // stop when isActive() is false).
     protected fun onNativeError(error: String) {
-        state.set(SessionState.TERMINAL)
+        // Session resources are released BEFORE the terminal publish: start()'s re-arm CAS must
+        // observe this TERMINAL write, so everything before it (the abandon) happens-before the
+        // next session's resource acquisition — a stale native-thread abandon can never reach the
+        // next session's freshly acquired resources (e.g. the player's audio focus).
         onSessionTerminated()
+        state.set(SessionState.TERMINAL)
         listener?.onError(error)
         Log.e(logTag, "${sessionLabel.replaceFirstChar { it.uppercase() }} error: $error")
     }
@@ -223,8 +232,9 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
     // Native layer callback (JNI-invoked; also self-run by stop() on delivery failure). Semantics:
     // a stopped/EOF notice means native already tore the session down, surfaced via onStopped.
     protected fun onNativeStopped() {
-        state.set(SessionState.TERMINAL)
+        // Same ordering as onNativeError: release before the TERMINAL publish (see there)
         onSessionTerminated()
+        state.set(SessionState.TERMINAL)
         listener?.onStopped()
         Log.i(logTag, "${sessionLabel.replaceFirstChar { it.uppercase() }} stopped")
     }

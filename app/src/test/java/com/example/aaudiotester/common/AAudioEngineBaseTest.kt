@@ -248,17 +248,17 @@ class AAudioEngineBaseTest {
     }
 
     @Test
-    fun `release from error state settles to idle without native stop`() {
+    fun `release from error state runs the cleanup stop and settles to idle`() {
         val (engine, listener) = newEngine()
         assertTrue(engine.start())
         engine.simulateNativeError("[TEST] error")
         engine.release()
         assertFalse(engine.isActive())
-        assertEquals(0, engine.stopNativeCalls)
+        assertEquals(1, engine.stopNativeCalls)  // release's own stop ran the cleanup
         assertEquals(1, engine.releaseNativeCalls)
         // A late queued stop after release hits the IDLE gate
         engine.stop()
-        assertEquals(0, engine.stopNativeCalls)
+        assertEquals(1, engine.stopNativeCalls)
         // Listener is detached by release: no further notifications
         engine.simulateNativeError("[TEST] after release")
         assertEquals(listOf("started", "error:[TEST] error"), listener.events)
@@ -268,14 +268,15 @@ class AAudioEngineBaseTest {
     fun `release settles to idle even when releaseNative throws`() {
         val (engine, _) = newEngine()
         assertTrue(engine.start())
-        // Enter release from a terminal ERROR state (no inner stop() that would settle first)
+        // Enter release from a terminal ERROR state: the inner stop() settles first, then
+        // releaseNative's throwable must still propagate to the outer guard
         engine.simulateNativeError("[TEST] error")
         engine.releaseNativeError = OutOfMemoryError("jni boundary")
         try {
             engine.release(); fail("Error must propagate to the outer guard")
         } catch (expected: OutOfMemoryError) {}
         engine.stop()
-        assertEquals(0, engine.stopNativeCalls)  // settled: the late stop hit the IDLE gate
+        assertEquals(1, engine.stopNativeCalls)  // the inner stop; the late stop hit the IDLE gate
     }
 
     @Test
