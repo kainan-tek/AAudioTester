@@ -62,23 +62,14 @@ class AAudioPlayer(context: Context, nativeExecutor: Executor) :
         }
     }
 
-    override fun setAudioConfig(config: AAudioConfig) {
-        if (isActive()) {
-            Log.w(TAG, "Cannot change configuration while playing")
-            return
-        }
-        // Native is the source of truth: a rejected config must not update currentConfig, or start
-        // would use parameters that were never applied. Rejection is defensive — the UI locks the
-        // spinner across the whole busy window, so no switch can be in flight; expect true here.
-        val applied = setNativeConfig(
+    override fun applyNativeConfig(config: AAudioConfig): Boolean =
+        setNativeConfig(
             AAudioConstants.getUsage(config.usage),
             AAudioConstants.getContentType(config.contentType),
             AAudioConstants.getPerformanceMode(config.performanceMode),
             AAudioConstants.getSharingMode(config.sharingMode),
             resolvePath(config)
         )
-        onConfigApplied(config, applied)
-    }
 
     override fun beforeStartNative(): String? {
         // Returned error strings are logged and delivered by the base template

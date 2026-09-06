@@ -448,23 +448,11 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_releaseNative(JNIEnv *env,
                                                                       jobject thiz) {
     LOGI("releaseNative");
 
-    // Stale-release guard: a newer instance owns the binding (rotation rebuild) — see
-    // JavaNotifier::isStaleRelease. The stream/wav state and the reference below belong to it.
-    if (g_recorder.notifier.isStaleRelease(env, thiz)) {
-        return;
+    if (!g_recorder.notifier.releaseSession(
+            env, thiz, g_recorder.stream || g_recorder.wav_file,
+            [&] { Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNative(env, thiz); })) {
+        return;  // Stale release: a newer instance owns the binding and the state below it
     }
-
-    // Clean up stream/WAV resources even if recording already ended (e.g. a stream error set
-    // is_recording false but left the WAV header unfinalized). stopNative resets
-    // stream/wav_file, so this condition also avoids re-running it after a normal stop.
-    if (g_recorder.stream || g_recorder.wav_file) {
-        Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNative(env, thiz);
-    }
-
-    // Binding is either unset or still ours here (the stale-release guard above returns on any
-    // takeover, and initialize cannot interleave — all native entry is FIFO on the shared
-    // executor): safe to clear the reference and method IDs.
-    g_recorder.notifier.clear(env);
 
     LOGI("AAudioRecorder released");
 }

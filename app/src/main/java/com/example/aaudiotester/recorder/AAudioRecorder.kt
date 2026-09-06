@@ -1,7 +1,6 @@
 package com.example.aaudiotester.recorder
 
 import android.content.Context
-import android.util.Log
 import com.example.aaudiotester.common.AAudioConfig
 import com.example.aaudiotester.common.AAudioConstants
 import com.example.aaudiotester.common.AAudioEngineBase
@@ -25,17 +24,10 @@ class AAudioRecorder(context: Context, nativeExecutor: Executor) :
 
     private val appContext = context.applicationContext
 
-    override fun setAudioConfig(config: AAudioConfig) {
-        if (isActive()) {
-            Log.w(TAG, "Cannot change configuration while recording")
-            return
-        }
+    override fun applyNativeConfig(config: AAudioConfig): Boolean {
         // Paths not ending in .wav are treated as directories by the native layer, which auto-generates a filename; invalid paths report a [FILE] error at start
         val audioFilePath = config.audioFilePath.ifBlank { getDefaultDirectory() }
-        // Native is the source of truth: a rejected config must not update currentConfig, or start
-        // would use parameters that were never applied. Rejection is defensive — the UI locks the
-        // spinner across the whole busy window, so no switch can be in flight; expect true here.
-        val applied = setNativeConfig(
+        return setNativeConfig(
             AAudioConstants.getInputPreset(config.inputPreset),
             config.sampleRate,
             config.channelCount,
@@ -44,7 +36,6 @@ class AAudioRecorder(context: Context, nativeExecutor: Executor) :
             AAudioConstants.getSharingMode(config.sharingMode),
             audioFilePath
         )
-        onConfigApplied(config, applied)
     }
 
     override fun beforeStartNative(): String? {

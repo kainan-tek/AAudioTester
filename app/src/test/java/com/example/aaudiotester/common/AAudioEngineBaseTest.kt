@@ -75,7 +75,14 @@ class AAudioEngineBaseTest {
             releaseNativeError?.let { throw it }
         }
         override fun onSessionTerminated() { terminatedCalls++ }
-        override fun setAudioConfig(config: AAudioConfig) {}  // engine-specific: not under test here
+
+        // Native config mapping: engine-specific, protocol under test here
+        var applyNativeConfigResult = true
+        var applyNativeConfigCalls = 0; private set
+        override fun applyNativeConfig(config: AAudioConfig): Boolean {
+            applyNativeConfigCalls++
+            return applyNativeConfigResult
+        }
 
         // Test-only bridges to the JNI-invoked callback entry points
         fun simulateNativeError(error: String) = onNativeError(error)
@@ -310,6 +317,27 @@ class AAudioEngineBaseTest {
         } catch (expected: OutOfMemoryError) {}
         assertEquals(1, engine.terminatedCalls)  // stands in for the player's focus release
         assertFalse(engine.isActive())
+    }
+
+    @Test
+    fun `setAudioConfig while active never touches native config`() {
+        val (engine, listener) = newEngine()
+        assertTrue(engine.start())
+        engine.setAudioConfig(AAudioConfig())
+        assertEquals(0, engine.applyNativeConfigCalls)  // the gate blocks the mapping
+        assertEquals(listOf("started"), listener.events)  // silent gate: no onConfigApplied delivery
+    }
+
+    @Test
+    fun `setAudioConfig while idle forwards the native result to the protocol`() {
+        val (engine, listener) = newEngine()
+        engine.applyNativeConfigResult = false
+        engine.setAudioConfig(AAudioConfig())
+        assertEquals(1, engine.applyNativeConfigCalls)
+        assertEquals(
+            listOf("error:${AAudioConstants.ErrorTypes.PARAM} Native rejected configuration"),
+            listener.events
+        )
     }
 
     @Test

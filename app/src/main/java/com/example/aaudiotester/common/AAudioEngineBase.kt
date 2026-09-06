@@ -16,8 +16,8 @@ import java.util.concurrent.atomic.AtomicReference
  *   any  --> IDLE           (stop / release settle)
  *
  * Subclasses keep only what genuinely differs: their JNI entry points (bound by class name, so the
- * external declarations and the JNI-named callback forwarders must stay in the subclass), config
- * handling, and start preconditions via [beforeStartNative].
+ * external declarations and the JNI-named callback forwarders must stay in the subclass), the
+ * native config mapping via [applyNativeConfig], and start preconditions via [beforeStartNative].
  */
 abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudioEngine {
 
@@ -115,6 +115,17 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
     final override fun setListener(listener: AAudioEngine.Listener?) {
         this.listener = listener
     }
+
+    final override fun setAudioConfig(config: AAudioConfig) {
+        if (isActive()) {
+            Log.w(logTag, "Cannot change configuration while $sessionLabel")
+            return
+        }
+        onConfigApplied(config, applyNativeConfig(config))
+    }
+
+    /** Maps the config onto the engine's native parameters; false = native rejected it. */
+    protected abstract fun applyNativeConfig(config: AAudioConfig): Boolean
 
     final override fun isActive(): Boolean = state.get() == SessionState.ACTIVE
 

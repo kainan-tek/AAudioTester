@@ -555,23 +555,11 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
 JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_releaseNative(JNIEnv* env, jobject thiz) {
     LOGI("Releasing AAudio player");
 
-    // Stale-release guard: a newer instance owns the binding (rotation rebuild) — see
-    // JavaNotifier::isStaleRelease. The stream/wav state and the reference below belong to it.
-    if (g_player.notifier.isStaleRelease(env, thiz)) {
-        return;
+    if (!g_player.notifier.releaseSession(
+            env, thiz, g_player.stream || g_player.wav_file,
+            [&] { Java_com_example_aaudiotester_player_AAudioPlayer_stopNative(env, thiz); })) {
+        return;  // Stale release: a newer instance owns the binding and the state below it
     }
-
-    // Clean up stream/WAV resources even if playback already ended (e.g. an error path whose queued
-    // stop() has not run yet). stopNative resets stream/wav_file to null, so this condition
-    // also avoids re-running it after a normal stop.
-    if (g_player.stream || g_player.wav_file) {
-        Java_com_example_aaudiotester_player_AAudioPlayer_stopNative(env, thiz);
-    }
-
-    // Binding is either unset or still ours here (the stale-release guard above returns on any
-    // takeover, and initialize cannot interleave — all native entry is FIFO on the shared
-    // executor): safe to clear the reference and method IDs.
-    g_player.notifier.clear(env);
 
     LOGI("AAudioPlayer released");
 }

@@ -285,6 +285,27 @@ struct JavaNotifier {
         return false;
     }
 
+    // releaseNative's three-step orchestration, owned once: the stale-release guard decides
+    // whether this instance still owns the state; the stop reclaims leftover session state (an
+    // error path can leave stream/wav allocated with no queued cleanup stop); clear drops the
+    // binding. Returns false when the release is stale — the caller must skip everything,
+    // including the stop.
+    template <typename Stop>
+    bool releaseSession(JNIEnv* env, jobject thiz, bool hasLiveState, Stop&& stop) {
+        if (isStaleRelease(env, thiz)) {
+            return false;
+        }
+        // stopNative nulls stream/wav_file itself, so hasLiveState also avoids re-running a
+        // stop that already completed
+        if (hasLiveState) {
+            stop();
+        }
+        // The guard returns on any takeover, and initialize cannot interleave (all native entry
+        // is FIFO on the shared executor): the binding is ours — safe to clear
+        clear(env);
+        return true;
+    }
+
     // The error-delivery policy shared by both engines: claim → deliver → release on failure so a
     // later path can retry. True iff delivered (false = swallowed by an earlier notice, or
     // delivery failed — callers with a genuine loss to report keep it attributable in logcat).
