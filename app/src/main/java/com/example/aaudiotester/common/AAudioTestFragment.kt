@@ -66,6 +66,11 @@ abstract class AAudioTestFragment : Fragment() {
     private var availableConfigs: List<AAudioConfig> = emptyList()
     private var currentConfig: AAudioConfig? = null
 
+    // UI-thread-only busy window: set by startInternal, cleared only by the start task's own
+    // completion post. updateButtons gates Start/spinner on it, so a callback lambda landing
+    // mid-window (stale or pre-completion) cannot re-enable them over the in-flight start
+    private var startInFlight = false
+
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             val denied = result.filterValues { !it }.keys
@@ -101,13 +106,13 @@ abstract class AAudioTestFragment : Fragment() {
             override fun onStarted() {
                 activity?.runOnUiThread {
                     if (!isAdded) return@runOnUiThread
-                    updateButtons(true); statusText.text = messages.active; updateInfo()
+                    updateButtons(engine.isActive()); statusText.text = messages.active; updateInfo()
                 }
             }
             override fun onStopped() {
                 activity?.runOnUiThread {
                     if (!isAdded) return@runOnUiThread
-                    updateButtons(false); statusText.text = messages.stopped; updateInfo()
+                    updateButtons(engine.isActive()); statusText.text = messages.stopped; updateInfo()
                 }
             }
             override fun onError(error: String) {
@@ -120,13 +125,14 @@ abstract class AAudioTestFragment : Fragment() {
                 if (!engine.isActive()) {
                     onEngineThread { if (!engine.isActive()) engine.stop() }
                 }
-                // Truthful buttons (same rationale as onEngineThread's catch): an "Already active"
-                // rejection arrives while the session is live — updateButtons(false) would disable
-                // Stop over it
-                val active = engine.isActive()
+                // Truthful buttons: sampled at UI-execution time, not delivery time — the post races
+                // concurrent callbacks from other threads, so execution-time sampling renders the
+                // state as of the moment this lambda runs (an "Already active" notice arrives on a
+                // live session, so Stop stays enabled over it). Mid-window Start/spinner re-enables
+                // are blocked by updateButtons' startInFlight gate, not here.
                 activity?.runOnUiThread {
                     if (!isAdded) return@runOnUiThread
-                    updateButtons(active); showError(error)
+                    updateButtons(engine.isActive()); showError(error)
                 }
             }
         })
@@ -194,11 +200,22 @@ abstract class AAudioTestFragment : Fragment() {
             return
         }
         statusText.text = messages.preparing
-        startButton.isEnabled = false  // prevent double-taps; button state is restored by onStarted/onError callbacks
-        // Lock the config too: native is busy mid-start until onStarted arrives, so a switch here
-        // would be silently rejected by the engine (configSpinner stays locked in updateButtons(true))
-        configSpinner.isEnabled = false
-        onEngineThread { engine.start() }
+        startInFlight = true
+        updateButtons(false)  // busy window opens; startInFlight keeps Start/spinner latched until the completion post below
+        onEngineThread {
+            try {
+                engine.start()
+            } finally {
+                // The authoritative window-close on every exit path (success, failure, throw):
+                // renders the freshest engine state — the start's own onStarted/onError fired
+                // before this or fires after with their own execution-time samples (idempotent)
+                activity?.runOnUiThread {
+                    if (!isAdded) return@runOnUiThread
+                    startInFlight = false
+                    updateButtons(engine.isActive())
+                }
+            }
+        }
     }
 
     private fun loadConfigurations(reload: Boolean = false) {
@@ -261,13 +278,14 @@ abstract class AAudioTestFragment : Fragment() {
     /**
      * Single writer of the button/spinner enabled states. Start additionally requires a config to
      * start: before any load succeeds it stays disabled (and a successful load/reload re-enables
-     * it by calling this with the populated availableConfigs). The one intentional exception is
-     * startInternal's busy-window direct write, restored by the engine callbacks.
+     * it by calling this with the populated availableConfigs). While [startInFlight] the busy
+     * window owns Start/spinner: they stay latched off regardless of [active], and only the start
+     * task's completion post (which clears the flag) restores them.
      */
     private fun updateButtons(active: Boolean) {
-        startButton.isEnabled = !active && availableConfigs.isNotEmpty()
+        startButton.isEnabled = !active && availableConfigs.isNotEmpty() && !startInFlight
         stopButton.isEnabled = active
-        configSpinner.isEnabled = !active
+        configSpinner.isEnabled = !active && !startInFlight
     }
 
     @SuppressLint("SetTextI18n")
