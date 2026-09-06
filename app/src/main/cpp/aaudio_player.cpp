@@ -139,7 +139,9 @@ static void stopReadThread() {
 
 // Playback reader thread: keeps reading WAV data into the ring buffer; the callback thread only memcpys and never touches disk.
 // Also serves as the termination notification thread: EOF/RT error JNI notifications are delivered here (non-RT thread); the callback thread only sets flags.
-// On the EOF path it also performs the session teardown (stream/wav_file/ring) — EOF sets Kotlin state to IDLE, so no queued stop() would clean up otherwise.
+// On the EOF path it also performs the session teardown (stream/wav_file/ring): no cleanup stop is
+// queued for a stopped notice, so this thread owns the release — a concurrently entering stopNative
+// is safe (it joins this thread first and finds the members null).
 static void playReadThread() {
     std::vector<char> buf(readChunkBytes());
     while (!g_player.stop_read_thread.load(std::memory_order_acquire)) {
@@ -167,7 +169,13 @@ static void playReadThread() {
             }
             g_player.is_playing.store(false, std::memory_order_release);
             if (const char* msg = g_player.rt_error.take()) {
-                g_player.notifier.deliverErrorOnce(msg, "playback error");
+                if (!g_player.notifier.deliverErrorOnce(msg, "playback error")) {
+                    // The session IS fully torn down below: fall back to the stopped notice as
+                    // the UI recovery — same self-run contract as Kotlin stop()'s !stopNative()
+                    // fallback. No-op when the claim was swallowed by an earlier notice (latch
+                    // owned); if this fails too, recovery stays with the manual stop, as below.
+                    g_player.notifier.deliverStoppedOnce("playback stopped");
+                }
             } else if (g_player.ring->readable() == 0) {
                 // Notify stopped only on a genuine drain. An exit via stop_read_thread with data
                 // still queued is a user stop or a failed start — notification belongs to
@@ -184,10 +192,11 @@ static void playReadThread() {
             // EOF: playback ended, proactively close the stream to release the hardware session (start/release resets are idempotent fallbacks;
             // executor-side stream operations all happen after joining the reader thread, so there is no concurrent reset)
             if (g_player.stream) g_player.stream.reset();
-            // Finish the teardown here: EOF sets Kotlin state to IDLE, so no queued stop() will clean up
-            // after us (unlike error paths, which delegate to the stop queued by onError). All executor-side
-            // entries join this thread first, and AAudioStream close waits for in-flight callbacks, so
-            // nothing can still touch these.
+            // Finish the teardown here: onNativeStopped sets TERMINAL (a queued stop() passing that gate
+            // can enter stopNative concurrently with us — safe, it joins this thread first and finds these
+            // null), and unlike error paths no cleanup stop is queued for a stopped notice, so this thread
+            // owns the release. Doing it unconditionally keeps the release prompt even when the listener
+            // never runs. AAudioStream close waits for in-flight callbacks, so nothing can still touch these.
             g_player.wav_file.reset();
             g_player.ring.reset();
             return;

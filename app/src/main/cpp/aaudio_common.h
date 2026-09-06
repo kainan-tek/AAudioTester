@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdarg>
+#include <cstdio>
 #include <memory>
 #include <string>
 
@@ -118,14 +119,18 @@ inline jclass bindJavaInstance(JNIEnv* env, jobject thiz, jobject& instance, con
 }
 
 // No-arg callback notification: null-check JNI refs + attach + CallVoidMethod.
-// Returns false when the notification was NOT delivered (references unset, thread attach failed)
-// so latch-consuming callers can release the latch — symmetric with notifyErrorToJava below.
+// Returns false when the notification was NOT delivered (references unset, thread attach failed,
+// or the listener threw) so latch-consuming callers can release the latch — symmetric with
+// notifyErrorToJava below.
 // Lock-free: all bind/release runs on the shared Kotlin executor thread, and the instance read
 // below cannot race it: initializeNative joins any leftover reader/writer worker BEFORE
 // rebinding (hard join-before-rebind invariant — a worker's late notifications always run
 // against the binding they were created under), AAudioStream_close joins in-flight callbacks,
 // and a released engine's late stop() is dropped by the IDLE gate set at the end of release().
-// A listener exception after CallVoidMethod still counts as delivered (returns true).
+// A listener exception after CallVoidMethod counts as NOT delivered (returns false): the notice's
+// effect (the listener's UI update) did not complete, and a claimed latch would leave no recovery
+// path. Returning false hands recovery to the established mechanisms (latch release → a later
+// stopped delivery, or Kotlin stop()'s self-run).
 inline bool callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, const char* name) {
     if (!jvm || !instance || !method) {
         AAC_LOGW("Cannot notify %s: JNI references not set", name);
@@ -141,14 +146,15 @@ inline bool callVoidMethod(JavaVM* jvm, jobject instance, jmethodID method, cons
         // A throwing listener must not leave a pending exception across DetachCurrentThread
         AAC_LOGW("Java listener threw in %s notification (exception cleared)", name);
         attach.env->ExceptionClear();
+        return false;  // not delivered: the listener's effect did not complete
     }
     return true;
 }
 
 // Error callback notification with a string argument.
-// Returns false when the notification was NOT delivered (references unset, thread attach failed, or string
-// creation failed) so the caller can release its dedup latch — a lost notification must not also consume the
-// right to notify. A listener exception after CallVoidMethod still counts as delivered (returns true).
+// Returns false when the notification was NOT delivered (references unset, thread attach failed,
+// string creation failed, or the listener threw) so the caller can release its dedup latch — a
+// lost notification must not also consume the right to notify.
 inline bool notifyErrorToJava(JavaVM* jvm, jobject instance, jmethodID method, const std::string& error,
                               const char* name) {
     if (!jvm || !instance || !method) {
@@ -170,9 +176,11 @@ inline bool notifyErrorToJava(JavaVM* jvm, jobject instance, jmethodID method, c
     attach.env->CallVoidMethod(instance, method, error_str);
     attach.env->DeleteLocalRef(error_str);
     if (attach.env->ExceptionCheck()) {
-        // Same as callVoidMethod: never detach with a pending exception
+        // Same as callVoidMethod: never detach with a pending exception, and a thrown listener
+        // counts as not delivered (the UI update did not complete — see there)
         AAC_LOGW("Java listener threw in %s notification (exception cleared)", name);
         attach.env->ExceptionClear();
+        return false;
     }
     return true;
 }
@@ -239,7 +247,9 @@ struct JavaNotifier {
 
     // Latch primitives. claim() takes the one-shot notification right (false = a notice was
     // already delivered); release() gives it back — on delivery failure (so a later path can
-    // retry) and at start (dropping the previous session's final in-flight claim).
+    // retry) and at start (dropping the previous session's final in-flight claim). A released
+    // claim means the same listener method may be invoked again later; accepted, because every
+    // listener effect is an idempotent UI-state write.
     bool claim() { return !notified.exchange(true, std::memory_order_acq_rel); }
     void release() { notified.store(false, std::memory_order_release); }
 
@@ -285,6 +295,9 @@ struct JavaNotifier {
         if (notifyErrorToJava(jvm, instance, error_method, error, name)) {
             return true;
         }
+        // The take()-style callers consume the message before delivering: without this log the
+        // text would be gone on a delivery failure (there is nothing left to retry from).
+        AAC_LOGW("%s not delivered: %s", name, error.c_str());
         release();
         return false;
     }
