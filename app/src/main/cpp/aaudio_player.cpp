@@ -186,8 +186,11 @@ static void playReadThread() {
                 // session (accepted: thread-attach failure is a memory-pressure edge).
                 g_player.notifier.deliverStoppedOnce("playback stopped");
             }
-            if (g_player.underrun_count.load(std::memory_order_relaxed) > 0) {
-                LOGW("Playback underruns: %zu", g_player.underrun_count.load(std::memory_order_relaxed));
+            // Report-and-consume: a later stopNative/release would otherwise re-report the same
+            // tally for this session (nothing else resets the count before the next startNative)
+            const size_t underruns = g_player.underrun_count.exchange(0, std::memory_order_relaxed);
+            if (underruns > 0) {
+                LOGW("Playback underruns: %zu", underruns);
             }
             // EOF: playback ended, proactively close the stream to release the hardware session (start/release resets are idempotent fallbacks;
             // executor-side stream operations all happen after joining the reader thread, so there is no concurrent reset)
@@ -539,8 +542,11 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_sto
     g_player.wav_file.reset();
     g_player.ring.reset();
 
-    if (g_player.underrun_count.load(std::memory_order_relaxed) > 0) {
-        LOGW("Playback underruns: %zu", g_player.underrun_count.load(std::memory_order_relaxed));
+    // Report-and-consume, same as the EOF path: one log per session, and any increment that raced
+    // past the EOF report's eof_reached check is still truthfully picked up here
+    const size_t underruns = g_player.underrun_count.exchange(0, std::memory_order_relaxed);
+    if (underruns > 0) {
+        LOGW("Playback underruns: %zu", underruns);
     }
 
 #if LATENCY_TEST_ENABLE
