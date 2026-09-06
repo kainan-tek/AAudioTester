@@ -48,6 +48,11 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
             currentConfig = config
         } else {
             Log.w(logTag, "Native rejected configuration, keeping previous")
+            // The Fragment switched its spinner before this ran: a silent rejection leaves the UI
+            // showing parameters the engine will never use — surface the mismatch. Safe to deliver
+            // bare: a config switch only happens while idle, so the Fragment's queued cleanup stop
+            // is a no-op and updateButtons lands on the truthful idle state.
+            listener?.onError("${AAudioConstants.ErrorTypes.PARAM} Native rejected configuration")
         }
     }
 

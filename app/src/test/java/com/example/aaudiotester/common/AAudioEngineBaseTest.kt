@@ -80,6 +80,7 @@ class AAudioEngineBaseTest {
         // Test-only bridges to the JNI-invoked callback entry points
         fun simulateNativeError(error: String) = onNativeError(error)
         fun simulateNativeStopped() = onNativeStopped()
+        fun simulateConfigRejected(config: AAudioConfig) = onConfigApplied(config, applied = false)
     }
 
     private class RecordingListener : AAudioEngine.Listener {
@@ -309,6 +310,17 @@ class AAudioEngineBaseTest {
         } catch (expected: OutOfMemoryError) {}
         assertEquals(1, engine.terminatedCalls)  // stands in for the player's focus release
         assertFalse(engine.isActive())
+    }
+
+    @Test
+    fun `native-rejected configuration surfaces to the listener`() {
+        val (engine, listener) = newEngine()
+        engine.simulateConfigRejected(AAudioConfig())
+        // The Fragment has already switched its spinner: the mismatch must not be silent
+        assertEquals(
+            listOf("error:${AAudioConstants.ErrorTypes.PARAM} Native rejected configuration"),
+            listener.events
+        )
     }
 
     @Test
