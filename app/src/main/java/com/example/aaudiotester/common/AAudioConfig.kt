@@ -38,23 +38,7 @@ data class AAudioConfig(
 
         /** Internal seam for JVM unit tests. Missing section → fallback defaults; empty section → empty list */
         internal fun parseConfigs(xml: InputStream, section: String): List<AAudioConfig> {
-            // XXE hardening: refuse DTDs / external entities where the parser supports the features.
-            // Some Android parsers lack them and setFeature would throw — degrade silently, since
-            // the config file is local-only (assets or /data, not attacker-controlled input).
-            val factory = DocumentBuilderFactory.newInstance().apply {
-                for (feature in listOf(
-                    "http://apache.org/xml/features/disallow-doctype-decl",
-                    "http://xml.org/sax/features/external-general-entities",
-                    "http://xml.org/sax/features/external-parameter-entities",
-                )) {
-                    try {
-                        setFeature(feature, true)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "XML parser does not support feature $feature")
-                    }
-                }
-            }
-            val sectionElement = factory.newDocumentBuilder()
+            val sectionElement = DocumentBuilderFactory.newInstance().newDocumentBuilder()
                 .parse(xml).documentElement.getElementsByTagName(section).item(0) as? Element?
                 ?: return getDefaultConfigs(section)
             val entries = sectionElement.getElementsByTagName("config")

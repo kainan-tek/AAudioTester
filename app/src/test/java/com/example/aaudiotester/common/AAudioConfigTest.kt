@@ -111,17 +111,6 @@ class AAudioConfigTest {
         AAudioConfig.parseConfigs(stream("not xml"), "player")
     }
 
-    @Test(expected = Exception::class)
-    fun parseConfigs_doctypeIsRejected_forLoadConfigsFallback() {
-        // JVM (Xerces) honors disallow-doctype-decl: a DOCTYPE throws and loadConfigs falls back
-        // to emergency defaults. A runtime Android parser lacking the feature degrades to
-        // permissive-but-local parsing instead — see parseConfigs' hardening comment.
-        AAudioConfig.parseConfigs(
-            stream("""<!DOCTYPE aaudioConfigs [<!ENTITY xxe "unused">]><aaudioConfigs><player><config><usage>&xxe;</usage></config></player></aaudioConfigs>"""),
-            "player"
-        )
-    }
-
     @Test
     fun realAssetsFile_parsesBothSections() {
         // Parse the real asset from the source tree directly, so XML typos surface before hitting a device
