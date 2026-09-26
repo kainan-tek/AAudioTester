@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstring>
 #include <vector>
@@ -24,7 +25,12 @@
 class SpScRingBuffer {
 public:
     explicit SpScRingBuffer(size_t capacity_pow2)
-        : mask_(capacity_pow2 - 1), buf_(capacity_pow2) {}
+        : mask_(capacity_pow2 - 1), buf_(capacity_pow2) {
+        // The mask/writable arithmetic below is only correct for a positive power of two:
+        // anything else misaligns the index mapping and can underflow writable() into a
+        // huge size_t, turning the bounded memcpy into an out-of-bounds write.
+        assert(capacity_pow2 > 0 && (capacity_pow2 & (capacity_pow2 - 1)) == 0);
+    }
 
     size_t capacity() const { return buf_.size(); }
 
