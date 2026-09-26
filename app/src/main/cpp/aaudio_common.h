@@ -264,7 +264,7 @@ struct JavaNotifier {
     // this dead instance; the caller must skip all cleanup. False = proceed with cleanup and call
     // clear(env) afterwards. (A null binding cannot coexist with live state: release clears both,
     // and initialize's failure path clears the binding only while no state exists.)
-    bool isStaleRelease(JNIEnv* env, jobject thiz) {
+    bool isStaleRelease(JNIEnv* env, jobject thiz) const {
         if (instance && !env->IsSameObject(thiz, instance)) {
             AAC_LOGW("Stale release ignored: binding owned by a newer instance");
             return true;

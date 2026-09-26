@@ -24,7 +24,9 @@ class AAudioEngineBaseTest {
         fun runAll() { val pending = tasks.toList(); tasks.clear(); pending.forEach { it.run() } }
     }
 
-    private class FakeEngine(private val executor: QueueExecutor = QueueExecutor(), bindResult: Boolean = true) :
+    private class FakeEngine(private val executor: QueueExecutor = QueueExecutor(),
+                             var bindResult: Boolean = true
+    ) :
         AAudioEngineBase(executor) {
 
         fun runQueuedTasks() = executor.runAll()
@@ -35,7 +37,6 @@ class AAudioEngineBaseTest {
         override val sessionLabel = "fake"
         override val alreadyActiveNotice = "Already fake"
 
-        var bindResult = bindResult
         var beforeStartError: String? = null
         @Volatile var startNativeResult = true
         @Volatile var startNativeError: Throwable? = null
@@ -104,9 +105,6 @@ class AAudioEngineBaseTest {
         engine.runQueuedTasks()  // constructor-time bind, now against the fully constructed engine
         return engine to listener
     }
-
-    private fun startAsync(engine: FakeEngine): Thread =
-        Thread { engine.start() }.apply { start() }
 
     @Test
     fun `start announces started and becomes active`() {
@@ -223,7 +221,7 @@ class AAudioEngineBaseTest {
 
     @Test
     fun `error then stop cleans up and returns to idle`() {
-        val (engine, listener) = newEngine()
+        val (engine, _) = newEngine()
         assertTrue(engine.start())
         engine.simulateNativeError("[TEST] error")
         engine.stop()
@@ -282,7 +280,7 @@ class AAudioEngineBaseTest {
         engine.releaseNativeError = OutOfMemoryError("jni boundary")
         try {
             engine.release(); fail("Error must propagate to the outer guard")
-        } catch (expected: OutOfMemoryError) {}
+        } catch (_: OutOfMemoryError) {}
         engine.stop()
         assertEquals(1, engine.stopNativeCalls)  // the inner stop; the late stop hit the IDLE gate
     }
@@ -301,7 +299,7 @@ class AAudioEngineBaseTest {
         engine.stopNativeError = OutOfMemoryError("jni boundary")
         try {
             engine.release(); fail("Error must propagate to the outer guard")
-        } catch (expected: OutOfMemoryError) {}
+        } catch (_: OutOfMemoryError) {}
         assertEquals(1, engine.releaseNativeCalls)  // reclaimed despite the escaped Error
         assertEquals(1, engine.terminatedCalls)     // focus released despite the escaped Error
         engine.stop()
@@ -314,7 +312,7 @@ class AAudioEngineBaseTest {
         engine.startNativeError = OutOfMemoryError("jni boundary")
         try {
             engine.start(); fail("Error must propagate to the outer guard")
-        } catch (expected: OutOfMemoryError) {}
+        } catch (_: OutOfMemoryError) {}
         assertEquals(1, engine.terminatedCalls)  // stands in for the player's focus release
         assertFalse(engine.isActive())
     }

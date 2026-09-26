@@ -185,7 +185,7 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
             if (state.get() == SessionState.IDLE) {
                 listener?.onError("${AAudioConstants.ErrorTypes.STREAM} Native start failed without error callback")
             }
-            result
+            false
         }
     }
 
@@ -218,7 +218,7 @@ abstract class AAudioEngineBase(protected val nativeExecutor: Executor) : AAudio
             // (stale-release guard + stream/wav null checks). Errors still propagate to the outer
             // guard — but reclaimed and settled. Narrowed residual: only when stop() itself threw
             // mid-teardown can releaseNative's internal stop still re-enter onNativeStopped after
-            // this settle (listener not yet nulled; the notice is truthful and UI-guarded).
+            // this settle (listener not yet null; the notice is truthful and UI-guarded).
             onSessionTerminated()
             state.set(SessionState.IDLE)
             try {
