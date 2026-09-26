@@ -46,7 +46,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb logcat -s AAudioConfig
 
 # Playback/recording logs (incl. native layer)
-adb logcat -s AAudioPlayer AAudioRecorder
+adb logcat -s AAudioPlayer AAudioRecorder AAudioWavFile AAudio
 ```
 
 ## Configuration

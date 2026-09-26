@@ -45,8 +45,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 # 配置加载日志
 adb logcat -s AAudioConfig
 
-# 播放/录音日志（含 native 层）
-adb logcat -s AAudioPlayer AAudioRecorder
+# 播放/录音日志（含 native 层：引擎 + WAV 文件 + 公共层）
+adb logcat -s AAudioPlayer AAudioRecorder AAudioWavFile AAudio
 ```
 
 ## 配置说明
