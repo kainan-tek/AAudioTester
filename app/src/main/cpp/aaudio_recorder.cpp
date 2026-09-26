@@ -2,7 +2,9 @@
 #include "ring_buffer.h"
 #include "wav_file.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <iomanip>
@@ -314,10 +316,14 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_setNativeConfig(JNIEnv *en
     g_recorder.sharing_mode = static_cast<aaudio_sharing_mode_t>(sharingMode);
 
     g_recorder.output_path = path_str;
-    // Check if path ends with .wav - if not, it's a directory path and we need to generate filename
-    g_recorder.auto_generate_filename =
-            (g_recorder.output_path.length() < 4 ||
-             g_recorder.output_path.substr(g_recorder.output_path.length() - 4) != ".wav");
+    // ".wav" suffix (case-insensitive) marks a file path; anything else is a directory path and
+    // gets an auto-generated filename. Case-insensitivity matches the Kotlin player-side check.
+    // substr(0) keeps the length<4 case safe (short strings can never equal ".wav").
+    std::string ext = g_recorder.output_path.substr(
+            g_recorder.output_path.length() >= 4 ? g_recorder.output_path.length() - 4 : 0);
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    g_recorder.auto_generate_filename = (ext != ".wav");
     env->ReleaseStringUTFChars(audioFilePath, path_str);
 
     return JNI_TRUE;

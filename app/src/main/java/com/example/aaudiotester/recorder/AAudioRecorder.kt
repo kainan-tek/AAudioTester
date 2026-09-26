@@ -25,7 +25,7 @@ class AAudioRecorder(context: Context, nativeExecutor: Executor) :
     private val appContext = context.applicationContext
 
     override fun applyNativeConfig(config: AAudioConfig): Boolean {
-        // Paths not ending in .wav are treated as directories by the native layer, which auto-generates a filename; invalid paths report a [FILE] error at start
+        // Paths not ending in .wav (case-insensitive) are treated as directories by the native layer, which auto-generates a filename; invalid paths report a [FILE] error at start
         val audioFilePath = config.audioFilePath.ifBlank { getDefaultDirectory() }
         return setNativeConfig(
             AAudioConstants.getInputPreset(config.inputPreset),

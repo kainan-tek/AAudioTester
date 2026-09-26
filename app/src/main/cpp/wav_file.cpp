@@ -272,12 +272,20 @@ bool WavFile::readFmtChunk() {
                 LOGE("Invalid fmt chunk size: %u", chunk_size);
                 return false;
             }
-            in_.read(reinterpret_cast<char*>(&header_.audio_format), 2);
-            in_.read(reinterpret_cast<char*>(&header_.num_channels), 2);
-            in_.read(reinterpret_cast<char*>(&header_.sample_rate), 4);
-            in_.read(reinterpret_cast<char*>(&header_.byte_rate), 4);
-            in_.read(reinterpret_cast<char*>(&header_.block_align), 2);
-            in_.read(reinterpret_cast<char*>(&header_.bits_per_sample), 2);
+            // One checked read for all 16 fields: reading field-by-field leaves partially-read
+            // garbage on a truncated file (e.g. a half-read sample_rate passing the >0 validation)
+            unsigned char fmt_body[16];
+            in_.read(reinterpret_cast<char*>(fmt_body), 16);
+            if (in_.gcount() != 16) {
+                LOGE("Failed to read fmt chunk fields");
+                return false;
+            }
+            std::memcpy(&header_.audio_format, fmt_body + 0, 2);
+            std::memcpy(&header_.num_channels, fmt_body + 2, 2);
+            std::memcpy(&header_.sample_rate, fmt_body + 4, 4);
+            std::memcpy(&header_.byte_rate, fmt_body + 8, 4);
+            std::memcpy(&header_.block_align, fmt_body + 12, 2);
+            std::memcpy(&header_.bits_per_sample, fmt_body + 14, 2);
             size_t consumed = 16;
             if (header_.audio_format == kWaveFormatExtensible) {
                 // EXTENSIBLE: from offset 16: cbSize(2)+validBits(2)+channelMask(4); from offset 24: subformat
