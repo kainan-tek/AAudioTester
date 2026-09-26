@@ -307,6 +307,8 @@ abstract class AAudioTestFragment : Fragment() {
     }
 
     private fun toast(msg: String) {
+        // A late spinner callback can land after the view is gone; requireContext() would throw
+        if (!isAdded) return
         Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show()
     }
 
