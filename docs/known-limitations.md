@@ -92,3 +92,11 @@ native 拒绝 `setNativeConfig`（唯一可达路径：`GetStringUTFChars` OOM�
 有审查意见建议具名化 `AAudioPlayer.requestAudioFocus` 的 `>= 1000` 系统 usage 判定（如定义 `SYSTEM_USAGE_BASE = 1000`），并消除 `audioFocusRequest!!` 的非空断言。
 
 拒绝理由：1000 不是随意的魔数——`AudioAttributes.USAGE_EMERGENCY` 等系统 usage 常量是 `@hide`（SDK 不可见），`AAudioConstants` 映射表里本就只能写字面量 1000-1003（该处有注释锚定），播放器的 `>= 1000` 是同一 SDK 约束的直接延续，具名化只是把字面量换个地方放，零功能收益。`audioFocusRequest!!` 的上一行刚完成赋值、不可能为 null，改局部变量纯属风格；该字段其余访问点均用安全调用，`!!` 只此一处，可读性影响有限。
+
+## 10. XML 配置解析不加固 XXE（审查意见，评估后拒绝）
+
+有审查意见建议对 `AAudioConfig.parseConfigs` 做 XXE 加固（`DocumentBuilderFactory` 逐 feature `setFeature` 禁用 DOCTYPE 与外部实体，不支持时降级）。
+
+拒绝理由：采姊妹项目 AudioTester known-limitations §8 的同一判断。威胁模型上：配置源为 root 可写的本地路径（外部文件优先、否则 assets），能放置恶意配置的前提是已持有设备 root，而 root 本就拥有设备与 app 的一切——加固不改变威胁模型。失败模式上：带 DOCTYPE 的合法配置被拒后经 `loadConfigs` 静默落回应急配置，对拿着失效配置做测试的人是陷阱——日志告警与单测锁定只能缓解、不能消除。测试工具里配置的正确生效优先于防御纵深。
+
+历史注记：2026-09 审查曾实施该加固（逐 feature try-catch 降级 + DOCTYPE 拒绝测试），复评时确认姊妹项目已有关键决策、且其理由在本项目同样成立，遂整体回撤——本条目即该反复的最终结论，后续审查不必再推演。
