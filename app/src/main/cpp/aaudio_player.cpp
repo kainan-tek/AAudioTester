@@ -277,7 +277,7 @@ static aaudio_data_callback_result_t audioCallback(AAudioStream* stream,
                 // GPIO failure: reference lost, disable the test to avoid muting audio into silence
                 g_player.latency_test_enabled.store(false, std::memory_order_relaxed);
                 closeGpio();
-            } else if (block % 1000 == 0) {                      // log once every 1000 blocks
+            } else if (block % 30 == 0) {                        // log once every 30 blocks (~30s at 480-frame burst / 48kHz)
                 LOGD("Latency test: count=%d, gpio=%d, mute=%d", count, gpio, muted ? 1 : 0);
             }
         }
