@@ -52,3 +52,21 @@ AAudio 数据/错误回调只设标志位；错误消息经 `RtErrorSlot`（静�
 native 拒绝 `setNativeConfig`（唯一可达路径：`GetStringUTFChars` OOM）时，引擎经 `onError` 报 `[PARAM] Native rejected configuration`，但不通知 Fragment 回滚 Spinner 的选中项——UI 继续显示被拒配置，直到用户重新选择任意配置项（触发新的 `setAudioConfig` 重新同步）。
 
 为什么接受：完整回滚需要 Fragment 反向读取引擎状态回选 Spinner，增加 UI 耦合；拒绝本身是内存压力级边缘，报错可见已消除"UI 与引擎静默分叉"的主要危害。
+
+## 6. 跨引擎互斥是时序性的，不是原子保证
+
+播放/录音互斥的实现：切 Tab 必然触发旧 Fragment 的 `onPause`，向**本 section 的 executor** 提交异步 `stop()`（MainActivity 的 ViewPager2 + AAudioTestFragment 的 onPause 钩子）。两个 section executor 相互独立并行，旧引擎的 stop 与新引擎的 start 之间没有任何协调点——若旧引擎的 stop 排在长任务之后（慢存储上的线程 join、release 收尾等），新引擎的 `startNative` 可能在旧引擎真正停流之前执行，物理上出现一个短暂的"同时播放+录音"重叠。
+
+特征：
+
+- 窗口通常毫秒级：`stopNative` 第一行即清 `is_playing`/`is_recording`，数据回调下一个周期即返回 STOP；重叠只在"切 Tab 后极快点 Start"的操作序列下可能出现。
+- 仅物理层重叠，UI 无卡死路径：旧引擎的 `onStopped` 通知最终一致地刷新按钮（`isAdded` 已守卫）；长时间双活跃在 UI 层不可能发生（每个 Tab 的 Start 只被本引擎的 isActive 门控，但切 Tab 必触发 onPause stop）。
+- README 手动验证清单第 3 条「无法同时播放+录音」描述的是常规操作与 UI 语义；本条目澄清其物理保证强度。
+
+为什么接受：两引擎用独立 executor 是刻意设计（一个引擎的慢 teardown 不得推迟另一个引擎的 start，见 AAudioTestFragment 的 sectionExecutors 注释），跨引擎强互斥必然要打破这一隔离或引入新的共享状态。
+
+为什么替代方案更糟：
+
+- **合并为单 executor**：直接违背上述隔离设计，慢存储场景下一个引擎的收尾会卡住另一个引擎的启动。
+- **共享互斥标志（如跨引擎 AtomicBoolean gate）**：需要为"start 遇对方 active"定义失败语义（报错？等待重试？），并处理 gate 与两端状态机之间的新竞态面——复杂度与一个毫秒级窗口的收益不成比例。
+- **切 Tab 时同步等待旧引擎停止**：阻塞主线程，或引入跨线程握手协议。

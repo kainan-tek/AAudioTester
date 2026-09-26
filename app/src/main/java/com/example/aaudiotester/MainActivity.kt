@@ -13,6 +13,7 @@ import com.google.android.material.tabs.TabLayoutMediator
 /**
  * Host activity: top tabs (playback/recording) + ViewPager2.
  * Exclusivity is achieved automatically by each Fragment stopping in onPause; no extra wiring needed.
+ * The guarantee is timing-based (independent section executors), not atomic — docs/known-limitations.md #6.
  */
 class MainActivity : AppCompatActivity() {
 
