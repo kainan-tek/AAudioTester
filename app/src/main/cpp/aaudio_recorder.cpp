@@ -426,8 +426,10 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_stopNative(JNIEnv *env,
     }
     g_recorder.ring.reset();
 
-    if (g_recorder.dropped_bytes.load(std::memory_order_relaxed) > 0) {
-        LOGW("Recording dropped bytes: %zu", g_recorder.dropped_bytes.load(std::memory_order_relaxed));
+    // Report-and-consume: one log per session — a repeated stopNative must not re-report the tally
+    const size_t dropped = g_recorder.dropped_bytes.exchange(0, std::memory_order_relaxed);
+    if (dropped > 0) {
+        LOGW("Recording dropped bytes: %zu", dropped);
     }
 
     // One-shot latch: only the first claimer notifies stopped (skipped if error/EOF already set).
