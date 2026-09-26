@@ -66,6 +66,7 @@ adb logcat -s AAudioPlayer AAudioRecorder AAudioWavFile AAudio
 | `channelCount` | 录音 | `1` | 声道数 |
 | `format` | 录音 | `16` | 位深 16/24/32 |
 | `audioFilePath` | 两者 | 空 | 播放：空 = 内置音源（解压到私有目录），或 `/data/xx.wav`；录音：空 = 私有目录自动命名 |
+| `bufferBursts` | 两者 | `0` | 流缓冲 = N × frames-per-burst（open 前按 N × 约10ms 预估放宽容量，不足时日志告警并钳制）；0 = 自动分档：低延迟 2、省电 4 |
 | `description` | 两者 | `Default Configuration` | Spinner 显示名 |
 
 ### 示例

@@ -44,6 +44,7 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_initializeNative(JNIEnv *e
  * @param performanceMode Performance mode
  * @param sharingMode Sharing mode
  * @param audioFilePath Output file path
+ * @param bufferBursts Stream buffer size in bursts (0 = auto tier)
  * @return JNI_TRUE if configuration set successfully, JNI_FALSE otherwise
  */
 JNIEXPORT jboolean JNICALL
@@ -55,7 +56,8 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_setNativeConfig(JNIEnv *en
                                                                       jint format,
                                                                       jint performanceMode,
                                                                       jint sharingMode,
-                                                                      jstring audioFilePath);
+                                                                      jstring audioFilePath,
+                                                                      jint bufferBursts);
 
 /**
  * Start audio recording

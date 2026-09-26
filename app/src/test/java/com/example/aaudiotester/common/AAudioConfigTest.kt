@@ -94,6 +94,7 @@ class AAudioConfigTest {
         assertEquals("AAUDIO_CONTENT_TYPE_MUSIC", c.contentType)  // omitted → default
         assertEquals(48000, c.sampleRate)
         assertEquals("Default Configuration", c.description)  // omitted → single-source DEFAULT.description
+        assertEquals(0, c.bufferBursts)  // omitted → auto tier (2 bursts low latency / 4 otherwise)
     }
 
     @Test
@@ -103,6 +104,24 @@ class AAudioConfigTest {
             "player"
         )
         assertEquals(48000, configs[0].sampleRate)
+    }
+
+    @Test
+    fun parseConfigs_negativeBufferBursts_clampedToAuto() {
+        val configs = AAudioConfig.parseConfigs(
+            stream("""<aaudioConfigs><player><config><bufferBursts>-5</bufferBursts></config></player></aaudioConfigs>"""),
+            "player"
+        )
+        assertEquals(0, configs[0].bufferBursts)  // negatives mean the auto tier
+    }
+
+    @Test
+    fun parseConfigs_explicitBufferBursts_parsed() {
+        val configs = AAudioConfig.parseConfigs(
+            stream("""<aaudioConfigs><recorder><config><bufferBursts>6</bufferBursts></config></recorder></aaudioConfigs>"""),
+            "recorder"
+        )
+        assertEquals(6, configs[0].bufferBursts)
     }
 
     @Test(expected = Exception::class)
@@ -120,5 +139,6 @@ class AAudioConfigTest {
         assertEquals(16, player.size)
         assertEquals(8, recorder.size)
         assertEquals("AAUDIO_USAGE_MEDIA", player[0].usage)
+        assertEquals(4, player[0].bufferBursts)  // explicit PS tier (equals the auto tier)
     }
 }

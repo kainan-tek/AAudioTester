@@ -20,6 +20,7 @@ data class AAudioConfig(
     val performanceMode: String = "AAUDIO_PERFORMANCE_MODE_LOW_LATENCY",  // common
     val sharingMode: String = "AAUDIO_SHARING_MODE_SHARED",
     val audioFilePath: String = "",                                  // empty value is interpreted by the engine
+    val bufferBursts: Int = 0,                                       // stream buffer in bursts; 0 = auto (2 for low latency, 4 otherwise)
     val description: String = "Default Configuration",
 ) {
     companion object {
@@ -56,6 +57,7 @@ data class AAudioConfig(
                         performanceMode = c.childText("performanceMode", DEFAULT.performanceMode),
                         sharingMode = c.childText("sharingMode", DEFAULT.sharingMode),
                         audioFilePath = c.childText("audioFilePath", DEFAULT.audioFilePath),
+                        bufferBursts = c.childInt("bufferBursts", DEFAULT.bufferBursts).coerceIn(0, 1000),  // cap keeps native capacity math in int32 range
                         description = c.childText("description", DEFAULT.description),
                     )
                 }.onFailure {

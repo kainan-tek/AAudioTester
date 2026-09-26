@@ -55,6 +55,8 @@ struct AudioRecorderState {
     aaudio_sharing_mode_t sharing_mode = AAUDIO_SHARING_MODE_SHARED;
     std::string output_path = "/data/recorded_48k_1ch_16bit.wav";
     bool auto_generate_filename = false;
+    // Stream buffer size in bursts (0 = auto tier: 2 bursts for low latency, 4 otherwise)
+    int32_t buffer_bursts = 0;
 };
 
 namespace {
@@ -223,7 +225,8 @@ static bool createAAudioStream() {
 
     // Set buffer capacity based on performance mode
     AAudioStreamBuilder_setBufferCapacityInFrames(
-            builder, aaudio_common::bufferCapacityFrames(g_recorder.sample_rate, g_recorder.performance_mode));
+            builder, aaudio_common::bufferCapacityFrames(g_recorder.sample_rate, g_recorder.performance_mode,
+                                                         g_recorder.buffer_bursts));
 
     AAudioStreamBuilder_setDataCallback(builder, audioCallback, nullptr);
     AAudioStreamBuilder_setErrorCallback(builder, errorCallback, nullptr);
@@ -237,7 +240,8 @@ static bool createAAudioStream() {
     }
     aaudio_common::adoptStream(g_recorder.stream, raw_stream, g_recorder.rt_error);
 
-    aaudio_common::optimizeBufferSize(g_recorder.stream.get(), g_recorder.performance_mode);
+    aaudio_common::optimizeBufferSize(g_recorder.stream.get(), g_recorder.performance_mode,
+                                      g_recorder.buffer_bursts);
 
     int32_t actual_sample_rate = AAudioStream_getSampleRate(g_recorder.stream.get());
     int32_t actual_channel_count = AAudioStream_getChannelCount(g_recorder.stream.get());
@@ -287,7 +291,8 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_setNativeConfig(JNIEnv *en
                                                                         jint format,
                                                                         jint performanceMode,
                                                                         jint sharingMode,
-                                                                        jstring audioFilePath) {
+                                                                        jstring audioFilePath,
+                                                                        jint bufferBursts) {
     LOGI("setNativeConfig");
 
     if (!isRecorderIdle()) {
@@ -314,6 +319,8 @@ Java_com_example_aaudiotester_recorder_AAudioRecorder_setNativeConfig(JNIEnv *en
     g_recorder.format = static_cast<aaudio_format_t>(format);
     g_recorder.performance_mode = static_cast<aaudio_performance_mode_t>(performanceMode);
     g_recorder.sharing_mode = static_cast<aaudio_sharing_mode_t>(sharingMode);
+    // Defensive re-clamp: anything ≤0 means the auto tier (Kotlin already coerces negatives to 0)
+    g_recorder.buffer_bursts = bufferBursts > 0 ? bufferBursts : 0;
 
     g_recorder.output_path = path_str;
     // ".wav" suffix (case-insensitive) marks a file path; anything else is a directory path and

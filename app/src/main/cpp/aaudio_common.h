@@ -19,6 +19,7 @@
 #define AAC_LOG_TAG "AAudio"
 #endif
 
+#define AAC_LOGI(...) __android_log_print(ANDROID_LOG_INFO, AAC_LOG_TAG, __VA_ARGS__)
 #define AAC_LOGW(...) __android_log_print(ANDROID_LOG_WARN, AAC_LOG_TAG, __VA_ARGS__)
 
 namespace aaudio_common {
@@ -340,25 +341,53 @@ inline int32_t bytesPerSample(aaudio_format_t format) {
     }
 }
 
-// Buffer capacity tiers: 40ms for low latency, 100ms otherwise
-inline int32_t bufferCapacityFrames(int32_t sample_rate, aaudio_performance_mode_t mode) {
-    return (mode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY) ? (sample_rate * 40) / 1000
-                                                         : (sample_rate * 100) / 1000;
+// Default burst tiers for the stream buffer: 2 bursts for low latency, 4 otherwise
+inline int32_t defaultBurstCount(aaudio_performance_mode_t mode) {
+    return (mode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY) ? 2 : 4;
 }
 
-// Optimize buffer size by burst: 2 bursts for low latency, 4 otherwise (capped at capacity)
-inline void optimizeBufferSize(AAudioStream* stream, aaudio_performance_mode_t mode) {
-    int32_t frames_per_burst = AAudioStream_getFramesPerBurst(stream);
-    if (frames_per_burst > 0) {
-        int32_t optimal_size = frames_per_burst * (mode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY ? 2 : 4);
-        optimal_size = std::min(optimal_size, AAudioStream_getBufferCapacityInFrames(stream));
-        const int32_t result = AAudioStream_setBufferSizeInFrames(stream, optimal_size);
-        if (result < 0) {
-            // On failure the default capacity is silently kept, distorting low-latency test results — this must be visible
-            AAC_LOGW("setBufferSizeInFrames(%d) failed: %s", optimal_size,
-                     AAudio_convertResultToText(result));
-        }
+// Builder-stage capacity estimate: the mode's time tier, widened when an explicit burst count
+// needs more room. frames_per_burst is unknown before open, so sample_rate/100 assumes a
+// ≤10ms burst (the common upper bound); a real burst beyond that is caught after open by
+// optimizeBufferSize's clamp warning — capacity and buffer size can never silently diverge.
+inline int32_t bufferCapacityFrames(int32_t sample_rate, aaudio_performance_mode_t mode,
+                                    int32_t buffer_bursts) {
+    const int32_t by_time = (mode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY)
+                                ? (sample_rate * 40) / 1000
+                                : (sample_rate * 100) / 1000;
+    const int32_t by_bursts = buffer_bursts > 0 ? buffer_bursts * (sample_rate / 100) : 0;
+    return std::max(by_time, by_bursts);
+}
+
+// Size the stream buffer by burst: explicit N bursts when buffer_bursts > 0, otherwise the
+// mode tier (defaultBurstCount). The request is clamped to capacity (AAudio clamps
+// setBufferSizeInFrames silently, so an under-sized capacity must be made visible here).
+// Logs requested vs applied on every session start.
+inline void optimizeBufferSize(AAudioStream* stream, aaudio_performance_mode_t mode,
+                               int32_t buffer_bursts) {
+    const int32_t frames_per_burst = AAudioStream_getFramesPerBurst(stream);
+    if (frames_per_burst <= 0) {
+        return;
     }
+    const int32_t bursts = buffer_bursts > 0 ? buffer_bursts : defaultBurstCount(mode);
+    const int32_t requested = frames_per_burst * bursts;
+    int32_t target = requested;
+    const int32_t capacity = AAudioStream_getBufferCapacityInFrames(stream);
+    if (capacity > 0 && target > capacity) {
+        AAC_LOGW("Requested buffer %d frames (%d bursts x %d) exceeds capacity %d - clamped",
+                 requested, bursts, frames_per_burst, capacity);
+        target = capacity;
+    }
+    const int32_t result = AAudioStream_setBufferSizeInFrames(stream, target);
+    if (result < 0) {
+        // On failure the default capacity is silently kept, distorting low-latency test results — this must be visible
+        AAC_LOGW("setBufferSizeInFrames(%d) failed: %s", target,
+                 AAudio_convertResultToText(result));
+        return;
+    }
+    // result is the size actually applied (the HAL may adjust the request downward)
+    AAC_LOGI("Buffer size: requested %d frames (%d bursts x %d), applied %d, capacity %d",
+             requested, bursts, frames_per_burst, result, capacity);
 }
 
 // Swap in the newly opened stream and clear the previous session's leftover terminal error. The

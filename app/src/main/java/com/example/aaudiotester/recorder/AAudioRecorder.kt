@@ -34,7 +34,8 @@ class AAudioRecorder(context: Context, nativeExecutor: Executor) :
             AAudioConstants.getFormatFromBitDepth(config.bitDepth),
             AAudioConstants.getPerformanceMode(config.performanceMode),
             AAudioConstants.getSharingMode(config.sharingMode),
-            audioFilePath
+            audioFilePath,
+            config.bufferBursts
         )
     }
 
@@ -64,7 +65,7 @@ class AAudioRecorder(context: Context, nativeExecutor: Executor) :
 
     private external fun setNativeConfig(
         inputPreset: Int, sampleRate: Int, channelCount: Int, format: Int,
-        performanceMode: Int, sharingMode: Int, audioFilePath: String
+        performanceMode: Int, sharingMode: Int, audioFilePath: String, bufferBursts: Int
     ): Boolean
 
     // Native layer callbacks: JNI binds by these exact names (aaudio_common.h); forward to the shared protocol

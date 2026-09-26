@@ -68,7 +68,8 @@ class AAudioPlayer(context: Context, nativeExecutor: Executor) :
             AAudioConstants.getContentType(config.contentType),
             AAudioConstants.getPerformanceMode(config.performanceMode),
             AAudioConstants.getSharingMode(config.sharingMode),
-            resolvePath(config)
+            resolvePath(config),
+            config.bufferBursts
         )
 
     override fun beforeStartNative(): String? {
@@ -130,7 +131,8 @@ class AAudioPlayer(context: Context, nativeExecutor: Executor) :
     external override fun releaseNative()
 
     private external fun setNativeConfig(
-        usage: Int, contentType: Int, performanceMode: Int, sharingMode: Int, filePath: String
+        usage: Int, contentType: Int, performanceMode: Int, sharingMode: Int, filePath: String,
+        bufferBursts: Int
     ): Boolean
 
     // Native layer callbacks: JNI binds by these exact names (aaudio_common.h); forward to the shared protocol

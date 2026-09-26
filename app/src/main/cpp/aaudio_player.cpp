@@ -61,6 +61,8 @@ struct AudioPlayerState {
     aaudio_performance_mode_t performance_mode = AAUDIO_PERFORMANCE_MODE_LOW_LATENCY;
     aaudio_sharing_mode_t sharing_mode = AAUDIO_SHARING_MODE_SHARED;
     std::string audio_file_path = "/data/48k_2ch_16bit.wav";
+    // Stream buffer size in bursts (0 = auto tier: 2 bursts for low latency, 4 otherwise)
+    int32_t buffer_bursts = 0;
 
 #if LATENCY_TEST_ENABLE
     std::atomic<int> write_counter{0};   // Single source of truth: block number derives mute and GPIO level
@@ -330,7 +332,8 @@ static bool createAAudioStream() {
     AAudioStreamBuilder_setPerformanceMode(builder, g_player.performance_mode);
 
     AAudioStreamBuilder_setBufferCapacityInFrames(
-        builder, aaudio_common::bufferCapacityFrames(sample_rate, g_player.performance_mode));
+        builder, aaudio_common::bufferCapacityFrames(sample_rate, g_player.performance_mode,
+                                                     g_player.buffer_bursts));
 
     AAudioStreamBuilder_setDataCallback(builder, audioCallback, nullptr);
     AAudioStreamBuilder_setErrorCallback(builder, errorCallback, nullptr);
@@ -344,7 +347,8 @@ static bool createAAudioStream() {
     }
     aaudio_common::adoptStream(g_player.stream, raw_stream, g_player.rt_error);
 
-    aaudio_common::optimizeBufferSize(g_player.stream.get(), g_player.performance_mode);
+    aaudio_common::optimizeBufferSize(g_player.stream.get(), g_player.performance_mode,
+                                      g_player.buffer_bursts);
 
     int32_t actual_rate = AAudioStream_getSampleRate(g_player.stream.get());
     int32_t actual_channels = AAudioStream_getChannelCount(g_player.stream.get());
@@ -354,7 +358,8 @@ static bool createAAudioStream() {
          actual_format, AAudioStream_getPerformanceMode(g_player.stream.get()));
 
     // AAudio has no getMinBufferSize: minBurst=AAudioStream_getFramesPerBurst is the minimum buffer unit,
-    // bufferSize=actual buffer (optimizeBufferSize set it to 2x/4x burst), capacity=upper limit.
+    // bufferSize=actual buffer (optimizeBufferSize: explicit config bufferBursts, or the 2x/4x auto tier),
+    // capacity=upper limit.
     int32_t frames_per_burst = AAudioStream_getFramesPerBurst(g_player.stream.get());
     int32_t buffer_size_frames = AAudioStream_getBufferSizeInFrames(g_player.stream.get());
     int32_t capacity_frames = AAudioStream_getBufferCapacityInFrames(g_player.stream.get());
@@ -404,7 +409,8 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_ini
 }
 
 JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_setNativeConfig(
-    JNIEnv* env, jobject thiz, jint usage, jint contentType, jint performanceMode, jint sharingMode, jstring filePath) {
+    JNIEnv* env, jobject thiz, jint usage, jint contentType, jint performanceMode, jint sharingMode, jstring filePath,
+    jint bufferBursts) {
     LOGI("setNativeConfig");
 
     if (!isPlayerIdle()) {
@@ -428,9 +434,12 @@ JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_set
     g_player.content_type = static_cast<aaudio_content_type_t>(contentType);
     g_player.performance_mode = static_cast<aaudio_performance_mode_t>(performanceMode);
     g_player.sharing_mode = static_cast<aaudio_sharing_mode_t>(sharingMode);
+    // Defensive re-clamp: anything ≤0 means the auto tier (Kotlin already coerces negatives to 0)
+    g_player.buffer_bursts = bufferBursts > 0 ? bufferBursts : 0;
 
-    LOGI("Config updated: usage=%d, contentType=%d, performanceMode=%d, sharingMode=%d, file=%s", g_player.usage,
-         g_player.content_type, g_player.performance_mode, g_player.sharing_mode, g_player.audio_file_path.c_str());
+    LOGI("Config updated: usage=%d, contentType=%d, performanceMode=%d, sharingMode=%d, bufferBursts=%d, file=%s",
+         g_player.usage, g_player.content_type, g_player.performance_mode, g_player.sharing_mode,
+         g_player.buffer_bursts, g_player.audio_file_path.c_str());
 
     return JNI_TRUE;
 }

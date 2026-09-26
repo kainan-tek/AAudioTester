@@ -68,10 +68,12 @@ JNIEXPORT void JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_release
  * @param performanceMode Performance mode integer value
  * @param sharingMode Sharing mode integer value
  * @param filePath Audio file path
+ * @param bufferBursts Stream buffer size in bursts (0 = auto tier)
  * @return JNI_TRUE if configuration set successfully, JNI_FALSE otherwise
  */
 JNIEXPORT jboolean JNICALL Java_com_example_aaudiotester_player_AAudioPlayer_setNativeConfig(
-    JNIEnv* env, jobject thiz, jint usage, jint contentType, jint performanceMode, jint sharingMode, jstring filePath);
+    JNIEnv* env, jobject thiz, jint usage, jint contentType, jint performanceMode, jint sharingMode, jstring filePath,
+    jint bufferBursts);
 
 #ifdef __cplusplus
 }

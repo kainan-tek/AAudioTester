@@ -66,6 +66,7 @@ adb logcat -s AAudioPlayer AAudioRecorder AAudioWavFile AAudio
 | `channelCount` | recorder | `1` | channel count |
 | `format` | recorder | `16` | bit depth 16/24/32 |
 | `audioFilePath` | both | empty | playback: empty = built-in source (extracted to private dir), or `/data/xx.wav`; recording: empty = auto-named private dir |
+| `bufferBursts` | both | `0` | stream buffer = N × frames-per-burst (capacity pre-widened before open with an N × ~10ms estimate; undersized requests log a warning and clamp); 0 = auto tier: 2 bursts for low latency, 4 otherwise |
 | `description` | both | `Default Configuration` | name shown in the Spinner |
 
 ### Example
