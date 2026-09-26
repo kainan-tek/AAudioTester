@@ -1,6 +1,6 @@
 # 实现层已知取舍（Developer-facing Known Limitations）
 
-本文记录通知与恢复协议中**设计上接受的取舍**——不是待修 bug 清单。每条 = 限制 + 为什么接受；替代方案若有必要也一并说明，避免后续审查重复推演。
+本文记录**设计上接受的取舍**与评估后**拒绝的审查意见**——不是待修 bug 清单。取舍条 = 限制 + 为什么接受；拒绝条 = 建议 + 拒绝理由；替代方案若有必要也一并说明，避免后续审查重复推演。
 
 约定：
 
@@ -70,3 +70,25 @@ native 拒绝 `setNativeConfig`（唯一可达路径：`GetStringUTFChars` OOM�
 - **合并为单 executor**：直接违背上述隔离设计，慢存储场景下一个引擎的收尾会卡住另一个引擎的启动。
 - **共享互斥标志（如跨引擎 AtomicBoolean gate）**：需要为"start 遇对方 active"定义失败语义（报错？等待重试？），并处理 gate 与两端状态机之间的新竞态面——复杂度与一个毫秒级窗口的收益不成比例。
 - **切 Tab 时同步等待旧引擎停止**：阻塞主线程，或引入跨线程握手协议。
+
+---
+
+以下条目记录 2026-09 代码审查中**评估后拒绝**的修改建议——建议本身成立但收益不抵成本，存档避免后续审查重复推演。
+
+## 7. 播放器路径二次 resolve：`applyNativeConfig` 与 `beforeStartNative` 各调一次（审查意见，评估后拒绝）
+
+有审查意见建议消除 `AAudioPlayer.resolvePath` 的重复调用：`applyNativeConfig`（config 变更路径）与 `beforeStartNative`（start 前置校验路径）对同一 config 各 resolve 一次。
+
+拒绝理由：`resolvePath` 是确定性纯函数（ifBlank 折叠 + asset 展开 + 异常回退原路径），同 config 两次调用结果必然一致，重复调用只有微小的解析开销、无正确性影响。消除它必须引入缓存——而缓存在 config 每次变更时都要失效同步，把"无状态重复"换成"有状态缓存"是净负收益；且 `beforeStartNative` 的 `.wav` 校验对象必须是**实际将传给 native 的最终路径**，与 `applyNativeConfig` 共享结果反而把两条职责链耦在一起。
+
+## 8. `determineFocusType` 用字符串 contains 匹配（审查意见，评估后拒绝）
+
+有审查意见建议把 `AAudioPlayer.determineFocusType` 的 `usage.contains("NAVIGATION")` / `contains("VOICE_COMMUNICATION")` 改为对常量 key 的精确匹配，或在 `AAudioConstants` 映射表里为每个 usage 预存焦点类型。
+
+拒绝理由：usage 名不是自由文本——它全部来自 `AAudioConstants` 的受控映射表 key（Spinner 取值与配置文件枚举都受其约束），contains 在受控词表上语义等价于枚举匹配，不存在误匹配路径。改映射表存结构化焦点类型需要动 MAP 定义、全部 getter 与相关测试，是零功能收益的纯风格重构。
+
+## 9. 系统 usage 魔数 1000 与 `audioFocusRequest!!`（审查意见，评估后拒绝）
+
+有审查意见建议具名化 `AAudioPlayer.requestAudioFocus` 的 `>= 1000` 系统 usage 判定（如定义 `SYSTEM_USAGE_BASE = 1000`），并消除 `audioFocusRequest!!` 的非空断言。
+
+拒绝理由：1000 不是随意的魔数——`AudioAttributes.USAGE_EMERGENCY` 等系统 usage 常量是 `@hide`（SDK 不可见），`AAudioConstants` 映射表里本就只能写字面量 1000-1003（该处有注释锚定），播放器的 `>= 1000` 是同一 SDK 约束的直接延续，具名化只是把字面量换个地方放，零功能收益。`audioFocusRequest!!` 的上一行刚完成赋值、不可能为 null，改局部变量纯属风格；该字段其余访问点均用安全调用，`!!` 只此一处，可读性影响有限。
